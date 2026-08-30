@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import type {
   AddReviewCommentInput,
+  AgentModelCatalog,
   AppSettings,
   CreateTaskInput,
   Project,
@@ -38,6 +39,7 @@ interface AppState {
   settings: AppSettings | null;
   systemHealth: SystemHealthStatus | null;
   isSettingsOpen: boolean;
+  modelCatalog: AgentModelCatalog | null;
 
   // --- Loading flags ---
   isLoadingProjects: boolean;
@@ -74,6 +76,9 @@ interface AppState {
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (input: UpdateSettingsInput) => Promise<void>;
+  /** Loads the model catalog from the backend. Call before opening the inline picker. */
+  openModelDialog: () => Promise<void>;
+  saveModelSelection: (modelId: string, effortId: string) => Promise<void>;
   refreshSystemHealth: () => Promise<void>;
   clearError: () => void;
 }
@@ -94,6 +99,7 @@ export const useStore = create<AppState>((set, get) => ({
   settings: null,
   systemHealth: null,
   isSettingsOpen: false,
+  modelCatalog: null,
   isLoadingProjects: false,
   isLoadingTasks: false,
   isLoadingReview: false,
@@ -355,6 +361,32 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   closeSettings: () => set({ isSettingsOpen: false }),
+
+  openModelDialog: async () => {
+    set({ error: null });
+    try {
+      const modelCatalog = await api.getAgentModels();
+      set({ modelCatalog });
+    } catch (e) {
+      set({ error: String(e) });
+    }
+  },
+
+  saveModelSelection: async (modelId: string, effortId: string) => {
+    const { settings } = get();
+    if (!settings) return;
+    try {
+      const updated = await api.updateSettings({
+        ...settings,
+        codexModel: modelId,
+        codexEffort: effortId,
+      });
+      set({ settings: updated });
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
 
   saveSettings: async (input: UpdateSettingsInput) => {
     set({ isSavingSettings: true, error: null });

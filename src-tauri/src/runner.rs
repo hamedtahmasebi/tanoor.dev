@@ -245,6 +245,11 @@ pub struct CodexExecRunner {
     /// resume turns.  Default: `true`.  Set to `false` when the pinned CLI
     /// build rejects those flags on `resume`.
     pub resume_with_flags: bool,
+    /// The model ID to pass via `--model`.  Defaults to `"o4-mini"`.
+    pub model: String,
+    /// The effort level to pass via `--effort` for o-series models.
+    /// `None` suppresses the flag (e.g. for GPT-4 class models).
+    pub effort: Option<String>,
 }
 
 impl Default for CodexExecRunner {
@@ -252,6 +257,8 @@ impl Default for CodexExecRunner {
         Self {
             codex_bin: "codex".to_string(),
             resume_with_flags: true,
+            model: "o4-mini".to_string(),
+            effort: Some("medium".to_string()),
         }
     }
 }
@@ -263,25 +270,35 @@ impl CodexExecRunner {
             ..Default::default()
         }
     }
-}
 
-fn initial_args(prompt: &str) -> Vec<&str> {
-    vec!["exec", "--json", "--sandbox", "workspace-write", prompt]
-}
+    /// Build the CLI args for starting a brand-new Codex thread.
+    fn initial_args<'a>(&'a self, prompt: &'a str) -> Vec<&'a str> {
+        let mut args = vec!["exec", "--json", "--sandbox", "workspace-write"];
+        args.extend(["--model", &self.model]);
+        if let Some(effort) = &self.effort {
+            if self.model.starts_with('o') {
+                args.extend(["--effort", effort.as_str()]);
+            }
+        }
+        args.push(prompt);
+        args
+    }
 
-fn resume_args<'a>(thread_id: &'a str, prompt: &'a str, with_flags: bool) -> Vec<&'a str> {
-    if with_flags {
-        vec![
-            "exec",
-            "--json",
-            "--sandbox",
-            "workspace-write",
-            "resume",
-            thread_id,
-            prompt,
-        ]
-    } else {
-        vec!["exec", "resume", thread_id, prompt]
+    /// Build the CLI args for resuming an existing Codex thread.
+    fn resume_args<'a>(&'a self, thread_id: &'a str, prompt: &'a str) -> Vec<&'a str> {
+        if self.resume_with_flags {
+            let mut args = vec!["exec", "--json", "--sandbox", "workspace-write"];
+            args.extend(["--model", &self.model]);
+            if let Some(effort) = &self.effort {
+                if self.model.starts_with('o') {
+                    args.extend(["--effort", effort.as_str()]);
+                }
+            }
+            args.extend(["resume", thread_id, prompt]);
+            args
+        } else {
+            vec!["exec", "resume", thread_id, prompt]
+        }
     }
 }
 
@@ -292,7 +309,7 @@ impl AgentRunner for CodexExecRunner {
         prompt: &str,
         log_path: &Path,
     ) -> Result<(RunHandle, EventStream), AppError> {
-        spawn_codex(&self.codex_bin, &initial_args(prompt), cwd, log_path)
+        spawn_codex(&self.codex_bin, &self.initial_args(prompt), cwd, log_path)
     }
 
     fn resume_turn(
@@ -304,7 +321,7 @@ impl AgentRunner for CodexExecRunner {
     ) -> Result<(RunHandle, EventStream), AppError> {
         spawn_codex(
             &self.codex_bin,
-            &resume_args(thread_id, prompt, self.resume_with_flags),
+            &self.resume_args(thread_id, prompt),
             cwd,
             log_path,
         )
@@ -703,21 +720,38 @@ mod tests {
         let r = CodexExecRunner::default();
         assert_eq!(r.codex_bin, "codex");
         assert!(r.resume_with_flags, "flags must be enabled by default");
+        assert_eq!(r.model, "o4-mini");
+        assert_eq!(r.effort.as_deref(), Some("medium"));
     }
 
     #[test]
     fn current_cli_arguments_do_not_use_full_auto() {
+        let r = CodexExecRunner::default();
         assert_eq!(
-            initial_args("prompt"),
-            ["exec", "--json", "--sandbox", "workspace-write", "prompt"]
-        );
-        assert_eq!(
-            resume_args("thread-id", "prompt", true),
+            r.initial_args("prompt"),
             [
                 "exec",
                 "--json",
                 "--sandbox",
                 "workspace-write",
+                "--model",
+                "o4-mini",
+                "--effort",
+                "medium",
+                "prompt",
+            ]
+        );
+        assert_eq!(
+            r.resume_args("thread-id", "prompt"),
+            [
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "--model",
+                "o4-mini",
+                "--effort",
+                "medium",
                 "resume",
                 "thread-id",
                 "prompt",

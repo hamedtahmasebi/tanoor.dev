@@ -53,6 +53,7 @@ pub fn run() {
             commands::update_task_prompt,
             commands::check_codex_health,
             commands::get_settings,
+            commands::get_agent_models,
             commands::update_settings,
             commands::check_system_health,
             commands::run_task,

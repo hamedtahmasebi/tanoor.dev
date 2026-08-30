@@ -135,6 +135,14 @@ fn run_migrations(conn: &Connection) -> Result<(), AppError> {
              INSERT OR REPLACE INTO _schema_version VALUES (3);",
         )?;
     }
+    if version < 4 {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES
+                ('codex_model', 'o4-mini'),
+                ('codex_effort', 'medium');
+             INSERT OR REPLACE INTO _schema_version VALUES (4);",
+        )?;
+    }
     Ok(())
 }
 
@@ -159,6 +167,8 @@ pub fn select_settings(conn: &Connection) -> Result<AppSettings, AppError> {
                 }
             }
             "merge_on_confirm" => settings.merge_on_confirm = value == "true",
+            "codex_model" if !value.trim().is_empty() => settings.codex_model = value,
+            "codex_effort" if !value.trim().is_empty() => settings.codex_effort = value,
             _ => {}
         }
     }
@@ -175,6 +185,8 @@ pub fn replace_settings(conn: &mut Connection, settings: &AppSettings) -> Result
             settings.max_concurrent_tasks.to_string(),
         ),
         ("merge_on_confirm", settings.merge_on_confirm.to_string()),
+        ("codex_model", settings.codex_model.clone()),
+        ("codex_effort", settings.codex_effort.clone()),
     ] {
         tx.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)

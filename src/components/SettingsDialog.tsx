@@ -7,6 +7,8 @@ const DEFAULTS: UpdateSettingsInput = {
   gitBin: "git",
   maxConcurrentTasks: 2,
   mergeOnConfirm: false,
+  codexModel: "o4-mini",
+  codexEffort: "medium",
 };
 
 function HealthBadge({ ready, label }: { ready: boolean; label: string }) {
@@ -35,6 +37,8 @@ export function SettingsDialog() {
       gitBin: settings.gitBin,
       maxConcurrentTasks: settings.maxConcurrentTasks,
       mergeOnConfirm: settings.mergeOnConfirm,
+      codexModel: settings.codexModel,
+      codexEffort: settings.codexEffort,
     });
   }, [settings]);
 

@@ -81,12 +81,41 @@ export interface AppSettings {
   maxConcurrentTasks: number;
   mergeOnConfirm: boolean;
   sandboxMode: "workspace-write";
+  codexModel: string;
+  codexEffort: string;
 }
 
 export type UpdateSettingsInput = Pick<
   AppSettings,
-  "codexBin" | "gitBin" | "maxConcurrentTasks" | "mergeOnConfirm"
+  "codexBin" | "gitBin" | "maxConcurrentTasks" | "mergeOnConfirm" | "codexModel" | "codexEffort"
 >;
+
+// ---------------------------------------------------------------------------
+// Agent model catalog — populated from the backend's static registry
+// ---------------------------------------------------------------------------
+
+export interface EffortLevel {
+  id: string;
+  description: string;
+}
+
+export interface ModelOption {
+  id: string;
+  label: string;
+  description: string;
+  /** Ordered list of effort levels this model supports. Empty = no effort control. */
+  effortLevels: EffortLevel[];
+  /** The effort id to pre-select when the user first picks this model. */
+  defaultEffort: string;
+}
+
+export interface AgentModelCatalog {
+  agentId: string;
+  agentLabel: string;
+  models: ModelOption[];
+  selectedModel: string;
+  selectedEffort: string;
+}
 
 export type DiffSide = "old" | "new";
 

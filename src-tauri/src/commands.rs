@@ -272,6 +272,147 @@ pub fn get_settings(state: State<'_, DbState>) -> Result<AppSettings, AppError> 
     db::select_settings(&conn)
 }
 
+// ---------------------------------------------------------------------------
+// Agent model catalog
+// ---------------------------------------------------------------------------
+
+/// One reasoning-effort level offered by a model.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortLevel {
+    pub id: String,
+    pub description: String,
+}
+
+/// One model entry returned to the frontend.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelOption {
+    /// The slug that is passed to `codex exec --model`.
+    pub id: String,
+    /// Human-readable name shown in the UI.
+    pub label: String,
+    pub description: String,
+    /// Ordered list of effort levels supported by this model.
+    /// Empty → model does not support effort control.
+    pub effort_levels: Vec<EffortLevel>,
+    /// The effort level that should be pre-selected when the user first picks
+    /// this model (matches one of `effort_levels[].id`, or empty string).
+    pub default_effort: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentModelCatalog {
+    pub agent_id: String,
+    pub agent_label: String,
+    pub models: Vec<ModelOption>,
+    pub selected_model: String,
+    pub selected_effort: String,
+}
+
+// ---------------------------------------------------------------------------
+// Raw types for parsing `codex debug models` JSON output
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct RawModelsResponse {
+    models: Vec<RawModel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawModel {
+    slug: String,
+    display_name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    default_reasoning_level: String,
+    #[serde(default)]
+    supported_reasoning_levels: Vec<RawReasoningLevel>,
+    #[serde(default)]
+    visibility: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RawReasoningLevel {
+    effort: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// Run `<codex_bin> debug models` and parse the JSON catalog.
+/// Returns an error if the process fails or the output is not valid JSON.
+fn fetch_codex_models(codex_bin: &str) -> Result<Vec<ModelOption>, AppError> {
+    let output = Command::new(codex_bin)
+        .args(["debug", "models"])
+        .output()
+        .map_err(|e| {
+            AppError::InvalidOperation(format!("Failed to run '{codex_bin} debug models': {e}"))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::InvalidOperation(format!(
+            "'{codex_bin} debug models' exited with status {}. stderr: {stderr}",
+            output.status
+        )));
+    }
+
+    let raw: RawModelsResponse = serde_json::from_slice(&output.stdout).map_err(|e| {
+        AppError::InvalidOperation(format!(
+            "Failed to parse '{codex_bin} debug models' output: {e}"
+        ))
+    })?;
+
+    let models = raw
+        .models
+        .into_iter()
+        // Only show models the CLI marks as visible in its own picker
+        .filter(|m| m.visibility != "hide")
+        .map(|m| {
+            let effort_levels = m
+                .supported_reasoning_levels
+                .into_iter()
+                .map(|r| EffortLevel {
+                    id: r.effort,
+                    description: r.description,
+                })
+                .collect::<Vec<_>>();
+            ModelOption {
+                id: m.slug,
+                label: m.display_name,
+                description: m.description,
+                default_effort: m.default_reasoning_level,
+                effort_levels,
+            }
+        })
+        .collect();
+
+    Ok(models)
+}
+
+#[tauri::command]
+pub fn get_agent_models(state: State<'_, DbState>) -> Result<AgentModelCatalog, AppError> {
+    let settings = {
+        let conn = state
+            .0
+            .lock()
+            .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+        db::select_settings(&conn)?
+    };
+
+    let models = fetch_codex_models(&settings.codex_bin)?;
+
+    Ok(AgentModelCatalog {
+        agent_id: "codex".to_string(),
+        agent_label: "Codex".to_string(),
+        models,
+        selected_model: settings.codex_model,
+        selected_effort: settings.codex_effort,
+    })
+}
+
 #[tauri::command]
 pub fn update_settings(
     state: State<'_, DbState>,
@@ -280,9 +421,13 @@ pub fn update_settings(
     git_bin: String,
     max_concurrent_tasks: usize,
     merge_on_confirm: bool,
+    codex_model: String,
+    codex_effort: String,
 ) -> Result<AppSettings, AppError> {
     let codex_bin = codex_bin.trim().to_string();
     let git_bin = git_bin.trim().to_string();
+    let codex_model = codex_model.trim().to_string();
+    let codex_effort = codex_effort.trim().to_string();
     if codex_bin.is_empty() || git_bin.is_empty() {
         return Err(AppError::InvalidOperation(
             "Codex and git binary paths cannot be empty".to_string(),
@@ -293,11 +438,23 @@ pub fn update_settings(
             "Maximum concurrent tasks must be between 1 and 16".to_string(),
         ));
     }
+    if codex_model.is_empty() {
+        return Err(AppError::InvalidOperation(
+            "Codex model cannot be empty".to_string(),
+        ));
+    }
+    if codex_effort.is_empty() {
+        return Err(AppError::InvalidOperation(
+            "Codex effort cannot be empty".to_string(),
+        ));
+    }
     let settings = AppSettings {
         codex_bin,
         git_bin,
         max_concurrent_tasks,
         merge_on_confirm,
+        codex_model,
+        codex_effort,
         ..AppSettings::default()
     };
     let mut conn = state

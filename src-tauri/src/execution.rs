@@ -226,7 +226,12 @@ pub fn start_task(
         }
     };
 
-    let runner = CodexExecRunner::new(settings.codex_bin);
+    let runner = CodexExecRunner {
+        codex_bin: settings.codex_bin,
+        model: settings.codex_model,
+        effort: Some(settings.codex_effort),
+        ..Default::default()
+    };
     let (handle, stream) = match runner.start_turn(
         &prepared.worktree_path,
         &prepared.prompt,
@@ -293,7 +298,12 @@ pub fn start_follow_up(
             }
         };
 
-    let runner = CodexExecRunner::new(settings.codex_bin);
+    let runner = CodexExecRunner {
+        codex_bin: settings.codex_bin,
+        model: settings.codex_model,
+        effort: Some(settings.codex_effort),
+        ..Default::default()
+    };
     let (handle, stream) = match runner.resume_turn(
         &prepared.run.worktree_path,
         &prepared.thread_id,

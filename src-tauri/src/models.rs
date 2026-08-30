@@ -60,6 +60,8 @@ pub struct AppSettings {
     pub max_concurrent_tasks: usize,
     pub merge_on_confirm: bool,
     pub sandbox_mode: String,
+    pub codex_model: String,
+    pub codex_effort: String,
 }
 
 /// A single agent turn associated with a task.
@@ -84,6 +86,8 @@ impl Default for AppSettings {
             max_concurrent_tasks: 2,
             merge_on_confirm: false,
             sandbox_mode: "workspace-write".to_string(),
+            codex_model: "o4-mini".to_string(),
+            codex_effort: "medium".to_string(),
         }
     }
 }

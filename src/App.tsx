@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./store";
@@ -51,6 +51,10 @@ function App() {
     openSettings,
     closeSettings,
   } = useStore();
+
+  // Callback ref: NewTaskDialog registers its openPicker function here so the
+  // command palette can trigger it without prop-drilling through the whole tree.
+  const openModelPickerRef = useRef<(() => void) | null>(null);
 
   const [showProjectDropdown, setShowProjectDropdown] = useState(false);
   const [navFilter, setNavFilter] = useState<NavFilter>("all");
@@ -215,7 +219,12 @@ function App() {
             />
           </section>
         ) : (
-          <NewTaskDialog project={currentProject} onClose={NOOP} onCreate={handleCreateTask} />
+          <NewTaskDialog
+            project={currentProject}
+            onClose={NOOP}
+            onCreate={handleCreateTask}
+            onOpenModelPicker={(open) => { openModelPickerRef.current = open; }}
+          />
         )}
 
         <footer className="status-bar"><span className="status-branch">⑂ main</span><span>workspace-write</span><span className="status-spacer" /><span>{currentProject ? projectDisplayName(currentProject.rootPath) : "No workspace"}</span><span>UTF-8</span></footer>
@@ -250,7 +259,7 @@ function App() {
 
       {isSettingsOpen && <SettingsDialog />}
 
-      {showCommandPalette && <div className="command-overlay" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setShowCommandPalette(false); }}><div className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-input-row"><span>⌕</span><input autoFocus placeholder="Search commands…" onKeyDown={(event) => { if (event.key === "Escape") setShowCommandPalette(false); }} /></div><div className="command-group-label">Suggestions</div><button type="button" className="command-item" onClick={() => { setSelectedTaskId(null); setShowCommandPalette(false); }}><span className="command-item-icon">＋</span><span>New task</span><kbd>⌘ N</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">⌁</span><span>Compact conversation</span><kbd>/ compact</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">◈</span><span>Change model</span><kbd>/ model</kbd></button><button type="button" className="command-item" onClick={handleAddProject}><span className="command-item-icon">⌂</span><span>Open project</span><kbd>⌘ O</kbd></button></div></div>}
+      {showCommandPalette && <div className="command-overlay" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setShowCommandPalette(false); }}><div className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-input-row"><span>⌕</span><input autoFocus placeholder="Search commands…" onKeyDown={(event) => { if (event.key === "Escape") setShowCommandPalette(false); }} /></div><div className="command-group-label">Suggestions</div><button type="button" className="command-item" onClick={() => { setSelectedTaskId(null); setShowCommandPalette(false); }}><span className="command-item-icon">＋</span><span>New task</span><kbd>⌘ N</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">⌁</span><span>Compact conversation</span><kbd>/ compact</kbd></button><button type="button" className="command-item" onClick={() => { setShowCommandPalette(false); setSelectedTaskId(null); requestAnimationFrame(() => openModelPickerRef.current?.()); }}><span className="command-item-icon">◈</span><span>Change model</span><kbd>/ model</kbd></button><button type="button" className="command-item" onClick={handleAddProject}><span className="command-item-icon">⌂</span><span>Open project</span><kbd>⌘ O</kbd></button></div></div>}
     </div>
   );
 }

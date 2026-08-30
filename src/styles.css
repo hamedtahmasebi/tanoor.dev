@@ -142,6 +142,7 @@ kbd { padding: 2px 5px; border: 1px solid #474844; border-radius: 4px; color: #9
 .composer-footnote { display: flex; align-items: center; gap: 7px; margin-top: 14px; color: #73766f; font-size: 10px; }
 .composer-footnote span { display: grid; width: 15px; height: 15px; place-items: center; border: 1px solid #555850; border-radius: 50%; color: #999a91; font-size: 9px; }
 
+
 .welcome-pane { display: flex; max-width: 440px; flex: 1; flex-direction: column; align-items: flex-start; justify-content: center; margin: 0 auto; padding: 40px; }
 .welcome-symbol { display: grid; width: 36px; height: 36px; place-items: center; margin-bottom: 17px; border: 1px solid #555850; border-radius: 8px; color: #aaa89e; background: #30322f; font-size: 20px; }
 .welcome-pane h1 { margin: 0; color: #dedcd4; font-size: 21px; font-weight: 500; }
@@ -258,5 +259,56 @@ kbd { padding: 2px 5px; border: 1px solid #474844; border-radius: 4px; color: #9
 .followup-output-line--live { color: #c2bfb5; }
 .followup-output-waiting { display: flex; align-items: center; gap: 8px; padding: 16px 14px; color: #8d8f87; font-size: 10px; }
 .followup-output-empty { padding: 16px 14px; color: #636660; font-size: 10px; }
+
+/* ---------------------------------------------------------------------------
+   Shared dialog shell  (modals, settings, review — NOT the inline model picker)
+   --------------------------------------------------------------------------- */
+
+.dialog-overlay { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: #11120fbb; backdrop-filter: blur(3px); }
+.dialog { display: flex; width: min(540px, calc(100vw - 56px)); max-height: min(720px, calc(100vh - 56px)); flex-direction: column; overflow: hidden; border: 1px solid #555750; border-radius: 8px; background: #272825; box-shadow: 0 26px 70px #0d0e0ccc; }
+.dialog-header { display: flex; min-height: 64px; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 0 19px 0 22px; border-bottom: 1px solid #41433e; background: #2c2e2b; }
+.dialog-header > div { display: flex; flex-direction: column; gap: 4px; }
+.dialog-header span { color: #85877f; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.dialog-header h1 { margin: 0; color: #dedcd3; font-size: 15px; font-weight: 500; }
+.dialog-header > button { width: 30px; height: 30px; border: 0; border-radius: 4px; color: #8f9189; background: transparent; font-size: 20px; }
+.dialog-header > button:hover { color: #e0ded5; background: #393b37; }
+.dialog-body { flex: 1; overflow-y: auto; padding: 20px 22px; display: flex; flex-direction: column; gap: 22px; }
+.dialog-loading { display: flex; flex: 1; align-items: center; justify-content: center; gap: 10px; padding: 60px; color: #96988f; font-size: 11px; }
+.dialog-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 18px; min-height: 57px; padding: 0 22px; border-top: 1px solid #41433e; background: #2c2e2b; }
+.dialog-footer-hint { color: #7f8179; font-size: 9px; }
+.dialog-footer-actions { display: flex; gap: 8px; }
+
+/* ---------------------------------------------------------------------------
+   Inline model picker
+   Shares the same visual language as .inline-palette (same bg, shadow, radius)
+   but is anchored below the model chip inside the composer footer.
+   --------------------------------------------------------------------------- */
+
+.composer-model-wrap { position: relative; }
+.composer-model-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; border: 1px solid #4a4c47; border-radius: 4px; color: #c0bdb3; background: transparent; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 10px; transition: border-color .1s, background .1s; }
+.composer-model-chip:hover, .composer-model-chip.open { border-color: #6e706a; color: #e0ded5; background: #2e302d; }
+.composer-model-chip-icon { color: #898b83; font-size: 11px; }
+
+/* The dropdown itself — same construction as .inline-palette */
+.model-picker { position: absolute; z-index: 20; bottom: calc(100% + 6px); right: 0; min-width: 280px; max-width: 340px; max-height: 360px; overflow-y: auto; border: 1px solid #575953; border-radius: 6px; background: #333532; box-shadow: 0 16px 35px #17181699; }
+.model-picker-header { display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; border-bottom: 1px solid #494b46; color: #9d9e96; font-size: 9px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.model-picker-header kbd { border: 0; background: transparent; color: #686b64; font-size: 9px; text-transform: lowercase; font-weight: 400; letter-spacing: 0; }
+
+/* Rows — shared between model and effort steps */
+.model-picker-item { display: flex; width: 100%; align-items: center; gap: 10px; padding: 8px 10px; border: 0; color: #c8c6be; background: transparent; text-align: left; }
+.model-picker-item:hover { background: #3d3f3b; }
+.model-picker-item.focused { background: #3d3f3b; outline: none; }
+.model-picker-item.selected .model-picker-item-label { color: #e1dfd7; }
+.model-picker-item-body { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 2px; }
+.model-picker-item-label { overflow: hidden; font-size: 11px; font-weight: 500; color: #d3d1c8; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-item-desc { overflow: hidden; color: #858780; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.model-picker-item-end { display: flex; flex-shrink: 0; align-items: center; gap: 6px; }
+.model-picker-item-check { width: 12px; color: #9b9890; font-size: 10px; text-align: center; }
+.model-picker-item.selected .model-picker-item-check { color: #c4c1b5; }
+.model-picker-badge { padding: 1px 4px; border: 1px solid #6b5f38; border-radius: 3px; color: #b4a375; background: #2a261a; font-size: 8px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; }
+
+/* "Back to model" link at top of effort step */
+.model-picker-back { display: flex; width: 100%; align-items: center; padding: 6px 10px; border: 0; border-bottom: 1px solid #494b46; color: #85877f; background: transparent; font-size: 9px; text-align: left; }
+.model-picker-back:hover { color: #c0bdb3; background: #3d3f3b; }
 
 @media (max-width: 980px) { .workspace-sidebar { width: 240px; flex-basis: 240px; }.composer-pane, .task-detail-pane { width: min(680px, calc(100% - 48px)); }.review-overlay, .settings-overlay { padding: 14px; }.review-dialog { width: calc(100vw - 28px); height: calc(100vh - 28px); }.settings-dialog { width: calc(100vw - 28px); max-height: calc(100vh - 28px); }.review-comment-thread, .review-comment-composer { margin-left: 12px; } }

@@ -12,6 +12,7 @@ import type {
   Task,
   TaskTurn,
   UpdateTaskInput,
+  AgentModelCatalog,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -72,6 +73,10 @@ type CommandContract = {
   update_settings: {
     args: UpdateSettingsInput;
     result: AppSettings;
+  };
+  get_agent_models: {
+    args: undefined;
+    result: AgentModelCatalog;
   };
   check_system_health: {
     args: undefined;
@@ -176,6 +181,9 @@ export const api = {
 
   updateSettings: (input: UpdateSettingsInput): Promise<AppSettings> =>
     invokeCommand("update_settings", input),
+
+  getAgentModels: (): Promise<AgentModelCatalog> =>
+    invokeCommand("get_agent_models", undefined),
 
   checkSystemHealth: (): Promise<SystemHealthStatus> =>
     invokeCommand("check_system_health", undefined),
