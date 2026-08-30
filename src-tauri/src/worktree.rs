@@ -13,7 +13,7 @@ use crate::error::AppError;
 // WorktreeManager
 // ---------------------------------------------------------------------------
 
-/// Drives every git operation Forge needs.
+/// Drives every git operation Tanoor needs.
 ///
 /// Branch naming convention: `task/<task_id>` (e.g. `task/abc123`).
 /// Worktree path convention (caller-controlled): `{app_data_dir}/worktrees/{task_id}`.
@@ -25,13 +25,17 @@ pub struct WorktreeManager {
 
 impl Default for WorktreeManager {
     fn default() -> Self {
-        Self { git_bin: "git".to_string() }
+        Self {
+            git_bin: "git".to_string(),
+        }
     }
 }
 
 impl WorktreeManager {
     pub fn new(git_bin: impl Into<String>) -> Self {
-        Self { git_bin: git_bin.into() }
+        Self {
+            git_bin: git_bin.into(),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -53,7 +57,10 @@ impl WorktreeManager {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
             let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
             let detail = if !stderr.is_empty() { stderr } else { stdout };
-            Err(AppError::Git(format!("`git {}` failed: {detail}", args.join(" "))))
+            Err(AppError::Git(format!(
+                "`git {}` failed: {detail}",
+                args.join(" ")
+            )))
         }
     }
 
@@ -127,14 +134,26 @@ impl WorktreeManager {
         worktree_path: &Path,
         branch_name: &str,
     ) -> Result<(), AppError> {
+        self.remove_worktree_keep_branch(repo_root, worktree_path)?;
+        // Non-fatal: branch may already be gone.
+        let _ = self.git(&["branch", "-D", branch_name], repo_root);
+        Ok(())
+    }
+
+    /// Remove a linked worktree while retaining its branch. Confirmation uses
+    /// this path when merge-on-confirm is disabled so the approved commit
+    /// remains reachable as `task/<task_id>`.
+    pub fn remove_worktree_keep_branch(
+        &self,
+        repo_root: &Path,
+        worktree_path: &Path,
+    ) -> Result<(), AppError> {
         let wt = worktree_path.to_string_lossy();
         if worktree_path.exists() {
             self.git(&["worktree", "remove", "--force", wt.as_ref()], repo_root)?;
         } else {
             let _ = self.git(&["worktree", "prune"], repo_root);
         }
-        // Non-fatal: branch may already be gone.
-        let _ = self.git(&["branch", "-D", branch_name], repo_root);
         Ok(())
     }
 
@@ -203,8 +222,18 @@ impl WorktreeManager {
     /// git merge --no-ff <branch_name>
     /// ```
     pub fn merge_branch(&self, repo_root: &Path, branch_name: &str) -> Result<(), AppError> {
-        self.git(&["merge", "--no-ff", branch_name], repo_root)?;
-        Ok(())
+        match self.git(&["merge", "--no-ff", branch_name], repo_root) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // A conflicted merge must not poison the user's main checkout.
+                // `merge --abort` is harmlessly ignored when Git rejected the
+                // merge before creating MERGE_HEAD (for example, dirty files).
+                let _ = self.git(&["merge", "--abort"], repo_root);
+                Err(AppError::Git(format!(
+                    "Could not merge '{branch_name}'. The merge was aborted; the task branch and worktree were kept for retry. {error}"
+                )))
+            }
+        }
     }
 }
 
@@ -233,8 +262,8 @@ mod tests {
     /// Returns the HEAD SHA.
     fn init_repo(dir: &Path) -> String {
         git_ok(&["init"], dir);
-        git_ok(&["config", "user.email", "test@forge.test"], dir);
-        git_ok(&["config", "user.name", "Forge Test"], dir);
+        git_ok(&["config", "user.email", "test@tanoor.test"], dir);
+        git_ok(&["config", "user.name", "Tanoor Test"], dir);
         git_ok(&["config", "commit.gpgsign", "false"], dir);
         std::fs::write(dir.join("README.md"), "# test repo\n").unwrap();
         git_ok(&["add", "."], dir);
@@ -296,12 +325,20 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t001", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t001", &base)
+            .unwrap();
 
-        assert!(wt.path().join("README.md").exists(), "worktree must contain initial files");
-        assert!(wm().is_git_repo(wt.path()), "worktree must be recognised as a git work tree");
+        assert!(
+            wt.path().join("README.md").exists(),
+            "worktree must contain initial files"
+        );
+        assert!(
+            wm().is_git_repo(wt.path()),
+            "worktree must be recognised as a git work tree"
+        );
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t001").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t001")
+            .unwrap();
 
         let branches = String::from_utf8(
             Command::new("git")
@@ -311,7 +348,10 @@ mod tests {
                 .stdout,
         )
         .unwrap();
-        assert!(!branches.contains("task/t001"), "branch must be deleted after removal");
+        assert!(
+            !branches.contains("task/t001"),
+            "branch must be deleted after removal"
+        );
     }
 
     #[test]
@@ -320,14 +360,16 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t002", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t002", &base)
+            .unwrap();
 
         // Dirty state: untracked file + modified tracked file.
         std::fs::write(wt.path().join("untracked.txt"), "dirty\n").unwrap();
         std::fs::write(wt.path().join("README.md"), "modified content\n").unwrap();
 
         // Must succeed despite dirty state (--force).
-        wm().remove_worktree(repo.path(), wt.path(), "task/t002").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t002")
+            .unwrap();
     }
 
     #[test]
@@ -336,13 +378,15 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t003", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t003", &base)
+            .unwrap();
 
         // Simulate an external deletion of the worktree directory.
         std::fs::remove_dir_all(wt.path()).unwrap();
 
         // prune-based path must succeed.
-        wm().remove_worktree(repo.path(), wt.path(), "task/t003").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t003")
+            .unwrap();
     }
 
     // --- diff ---
@@ -353,12 +397,14 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t004", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t004", &base)
+            .unwrap();
 
         let diff = wm().diff(wt.path(), &base).unwrap();
         assert!(diff.is_empty(), "fresh worktree must produce an empty diff");
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t004").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t004")
+            .unwrap();
     }
 
     #[test]
@@ -367,7 +413,8 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t005", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t005", &base)
+            .unwrap();
         std::fs::write(wt.path().join("README.md"), "# modified heading\n").unwrap();
 
         let diff = wm().diff(wt.path(), &base).unwrap();
@@ -379,7 +426,8 @@ mod tests {
         let diff2 = wm().diff(wt.path(), &base).unwrap();
         assert_eq!(diff, diff2, "repeated diff must be idempotent");
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t005").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t005")
+            .unwrap();
     }
 
     #[test]
@@ -388,14 +436,16 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t006", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t006", &base)
+            .unwrap();
         std::fs::write(wt.path().join("new_file.py"), "print('hello')\n").unwrap();
 
         let diff = wm().diff(wt.path(), &base).unwrap();
         assert!(!diff.is_empty(), "new untracked files must appear in diff");
         assert!(diff.contains("new_file.py"));
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t006").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t006")
+            .unwrap();
     }
 
     // --- commit and merge ---
@@ -406,10 +456,13 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t007", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t007", &base)
+            .unwrap();
         std::fs::write(wt.path().join("output.txt"), "codex result\n").unwrap();
 
-        let new_sha = wm().commit_all(wt.path(), "Forge: apply Codex changes").unwrap();
+        let new_sha = wm()
+            .commit_all(wt.path(), "Tanoor: apply Codex changes")
+            .unwrap();
 
         assert_ne!(new_sha, base, "new commit SHA must differ from base");
         assert_eq!(new_sha.len(), 40);
@@ -423,13 +476,20 @@ mod tests {
                 .stdout,
         )
         .unwrap();
-        assert!(status.is_empty(), "working tree must be clean after commit_all");
+        assert!(
+            status.is_empty(),
+            "working tree must be clean after commit_all"
+        );
 
         // Diff against base must still show the committed change.
         let diff = wm().diff(wt.path(), &base).unwrap();
-        assert!(!diff.is_empty(), "diff against base_ref must include committed changes");
+        assert!(
+            !diff.is_empty(),
+            "diff against base_ref must include committed changes"
+        );
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t007").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t007")
+            .unwrap();
     }
 
     #[test]
@@ -438,15 +498,22 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t008", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t008", &base)
+            .unwrap();
 
         // No changes — commit_all must return the current HEAD without creating an empty commit.
-        let returned_sha = wm().commit_all(wt.path(), "Forge: empty commit").unwrap();
+        let returned_sha = wm().commit_all(wt.path(), "Tanoor: empty commit").unwrap();
         assert_eq!(returned_sha, head_sha_raw(wt.path()));
 
         let log_count: usize = String::from_utf8(
             Command::new("git")
-                .args(["-C", wt.path().to_str().unwrap(), "rev-list", "--count", "HEAD"])
+                .args([
+                    "-C",
+                    wt.path().to_str().unwrap(),
+                    "rev-list",
+                    "--count",
+                    "HEAD",
+                ])
                 .output()
                 .unwrap()
                 .stdout,
@@ -455,9 +522,45 @@ mod tests {
         .trim()
         .parse()
         .unwrap();
-        assert_eq!(log_count, 1, "no extra commit must be created when nothing changed");
+        assert_eq!(
+            log_count, 1,
+            "no extra commit must be created when nothing changed"
+        );
 
-        wm().remove_worktree(repo.path(), wt.path(), "task/t008").unwrap();
+        wm().remove_worktree(repo.path(), wt.path(), "task/t008")
+            .unwrap();
+    }
+
+    #[test]
+    fn remove_worktree_keep_branch_preserves_approved_commit() {
+        let repo = TempDir::new().unwrap();
+        let wt = TempDir::new().unwrap();
+        let base = init_repo(repo.path());
+
+        wm().add_worktree(repo.path(), wt.path(), "task/t008-keep", &base)
+            .unwrap();
+        std::fs::write(wt.path().join("approved.txt"), "approved\n").unwrap();
+        let approved_sha = wm().commit_all(wt.path(), "Tanoor: approved").unwrap();
+
+        wm().remove_worktree_keep_branch(repo.path(), wt.path())
+            .unwrap();
+
+        let branch_sha = String::from_utf8(
+            Command::new("git")
+                .args([
+                    "-C",
+                    repo.path().to_str().unwrap(),
+                    "rev-parse",
+                    "task/t008-keep",
+                ])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_eq!(branch_sha, approved_sha);
     }
 
     #[test]
@@ -466,16 +569,24 @@ mod tests {
         let wt = TempDir::new().unwrap();
         let base = init_repo(repo.path());
 
-        wm().add_worktree(repo.path(), wt.path(), "task/t009", &base).unwrap();
+        wm().add_worktree(repo.path(), wt.path(), "task/t009", &base)
+            .unwrap();
         std::fs::write(wt.path().join("feature.txt"), "feature output\n").unwrap();
-        wm().commit_all(wt.path(), "Forge: feature").unwrap();
+        wm().commit_all(wt.path(), "Tanoor: feature").unwrap();
 
         // Remove the worktree but keep the branch.
         let wt_path = wt.path().to_path_buf();
         // We need to keep wt alive so the path stays valid; remove the worktree via git.
         let wt_str = wt_path.to_string_lossy();
         let _ = Command::new("git")
-            .args(["-C", repo.path().to_str().unwrap(), "worktree", "remove", "--force", wt_str.as_ref()])
+            .args([
+                "-C",
+                repo.path().to_str().unwrap(),
+                "worktree",
+                "remove",
+                "--force",
+                wt_str.as_ref(),
+            ])
             .status();
 
         // Merge the task branch into the main repo.
@@ -496,6 +607,54 @@ mod tests {
                 .stdout,
         )
         .unwrap();
-        assert!(log.lines().count() >= 3, "must have initial + feature + merge commit");
+        assert!(
+            log.lines().count() >= 3,
+            "must have initial + feature + merge commit"
+        );
+    }
+
+    #[test]
+    fn merge_conflict_is_aborted_and_task_branch_is_retained() {
+        let repo = TempDir::new().unwrap();
+        let wt = TempDir::new().unwrap();
+        let base = init_repo(repo.path());
+
+        wm().add_worktree(repo.path(), wt.path(), "task/t010", &base)
+            .unwrap();
+        std::fs::write(wt.path().join("README.md"), "# task version\n").unwrap();
+        wm().commit_all(wt.path(), "Tanoor: task version").unwrap();
+
+        std::fs::write(repo.path().join("README.md"), "# main version\n").unwrap();
+        git_ok(&["add", "README.md"], repo.path());
+        git_ok(&["commit", "-m", "main version"], repo.path());
+
+        let error = wm().merge_branch(repo.path(), "task/t010").unwrap_err();
+        assert!(error.to_string().contains("merge was aborted"));
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("README.md"))
+                .unwrap()
+                .trim(),
+            "# main version"
+        );
+        let merge_head = Command::new("git")
+            .args([
+                "-C",
+                repo.path().to_str().unwrap(),
+                "rev-parse",
+                "-q",
+                "--verify",
+                "MERGE_HEAD",
+            ])
+            .status()
+            .unwrap();
+        assert!(
+            !merge_head.success(),
+            "main checkout must not remain mid-merge"
+        );
+        assert!(wt.path().exists(), "task worktree must remain for retry");
+        assert!(
+            !head_sha_raw(wt.path()).is_empty(),
+            "task branch must remain reachable"
+        );
     }
 }

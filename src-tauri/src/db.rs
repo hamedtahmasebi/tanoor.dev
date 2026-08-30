@@ -2,7 +2,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::{
     error::AppError,
-    models::{Project, Task},
+    models::{AppSettings, Project, ReviewComment, Task},
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +101,64 @@ fn run_migrations(conn: &Connection) -> Result<(), AppError> {
         }
         conn.execute("INSERT OR REPLACE INTO _schema_version VALUES (2)", [])?;
     }
+    if version < 3 {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES
+                ('codex_bin', 'codex'),
+                ('git_bin', 'git'),
+                ('max_concurrent_tasks', '2'),
+                ('merge_on_confirm', 'false');
+             INSERT OR REPLACE INTO _schema_version VALUES (3);",
+        )?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+pub fn select_settings(conn: &Connection) -> Result<AppSettings, AppError> {
+    let mut settings = AppSettings::default();
+    let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (key, value) = row?;
+        match key.as_str() {
+            "codex_bin" if !value.trim().is_empty() => settings.codex_bin = value,
+            "git_bin" if !value.trim().is_empty() => settings.git_bin = value,
+            "max_concurrent_tasks" => {
+                if let Ok(value @ 1..=16) = value.parse::<usize>() {
+                    settings.max_concurrent_tasks = value;
+                }
+            }
+            "merge_on_confirm" => settings.merge_on_confirm = value == "true",
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+pub fn replace_settings(conn: &mut Connection, settings: &AppSettings) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    for (key, value) in [
+        ("codex_bin", settings.codex_bin.clone()),
+        ("git_bin", settings.git_bin.clone()),
+        (
+            "max_concurrent_tasks",
+            settings.max_concurrent_tasks.to_string(),
+        ),
+        ("merge_on_confirm", settings.merge_on_confirm.to_string()),
+    ] {
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
@@ -117,9 +175,8 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<(), AppErr
 }
 
 pub fn select_all_projects(conn: &Connection) -> Result<Vec<Project>, AppError> {
-    let mut stmt = conn.prepare(
-        "SELECT id, root_path, created_at FROM project ORDER BY created_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, root_path, created_at FROM project ORDER BY created_at DESC")?;
     let projects = stmt
         .query_map([], |row| {
             Ok(Project {
@@ -174,8 +231,7 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
 }
 
 /// SELECT clause that matches `row_to_task`'s column indices.
-const TASK_SELECT: &str =
-    "SELECT id, project_id, title, prompt, file_refs, status,
+const TASK_SELECT: &str = "SELECT id, project_id, title, prompt, file_refs, status,
             base_ref, worktree_path, branch_name, agent_thread_id,
             diff, created_at, updated_at
      FROM task";
@@ -303,10 +359,204 @@ pub fn reset_task_run(conn: &Connection, task_id: &str, now: &str) -> Result<(),
     Ok(())
 }
 
-pub fn select_tasks_by_project(
+pub fn begin_follow_up(
     conn: &Connection,
-    project_id: &str,
-) -> Result<Vec<Task>, AppError> {
+    task_id: &str,
+    turn_id: &str,
+    prompt: &str,
+    log_path: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    let changed = conn.execute(
+        "UPDATE task SET status = 'running', updated_at = ?1
+         WHERE id = ?2 AND status IN ('awaiting_review', 'changes_requested')",
+        params![now, task_id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::InvalidOperation(format!(
+            "Task '{task_id}' is not ready for a follow-up turn"
+        )));
+    }
+
+    if let Err(error) = insert_turn(
+        conn,
+        turn_id,
+        task_id,
+        "follow_up",
+        prompt,
+        "running",
+        log_path,
+        now,
+    ) {
+        let _ = conn.execute(
+            "UPDATE task SET status = 'changes_requested', updated_at = ?1 WHERE id = ?2",
+            params![now, task_id],
+        );
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn fail_follow_up_start(
+    conn: &Connection,
+    task_id: &str,
+    turn_id: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    finish_turn(conn, turn_id, "failed", now)?;
+    conn.execute(
+        "UPDATE task SET status = 'changes_requested', updated_at = ?1 WHERE id = ?2",
+        params![now, task_id],
+    )?;
+    Ok(())
+}
+
+pub fn approve_task(
+    conn: &Connection,
+    task_id: &str,
+    keep_branch: bool,
+    now: &str,
+) -> Result<(), AppError> {
+    let changed = conn.execute(
+        "UPDATE task
+         SET status = 'approved', worktree_path = NULL,
+             branch_name = CASE WHEN ?1 THEN branch_name ELSE NULL END,
+             updated_at = ?2
+         WHERE id = ?3 AND status = 'awaiting_review'",
+        params![keep_branch, now, task_id],
+    )?;
+    if changed == 0 {
+        return Err(AppError::InvalidOperation(format!(
+            "Task '{task_id}' is no longer awaiting review"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Review comments
+// ---------------------------------------------------------------------------
+
+pub fn select_latest_turn_id(conn: &Connection, task_id: &str) -> Result<Option<String>, AppError> {
+    conn.query_row(
+        "SELECT id FROM turn WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        params![task_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(AppError::from)
+}
+
+pub fn insert_review_comment(conn: &Connection, comment: &ReviewComment) -> Result<(), AppError> {
+    conn.execute(
+        "INSERT INTO review_comment
+         (id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            comment.id,
+            comment.task_id,
+            comment.turn_id,
+            comment.file_path,
+            comment.line_number,
+            comment.side,
+            comment.body,
+            i64::from(comment.resolved),
+            comment.created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn select_review_comments(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<ReviewComment>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+         FROM review_comment WHERE task_id = ?1 ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let comments = stmt
+        .query_map(params![task_id], row_to_review_comment)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(comments)
+}
+
+pub fn select_unresolved_review_comments(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<ReviewComment>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+         FROM review_comment
+         WHERE task_id = ?1 AND resolved = 0
+         ORDER BY created_at ASC, rowid ASC",
+    )?;
+    let comments = stmt
+        .query_map(params![task_id], row_to_review_comment)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(comments)
+}
+
+pub fn resolve_review_comments(
+    conn: &Connection,
+    task_id: &str,
+    comment_ids: &[String],
+) -> Result<(), AppError> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let mut stmt =
+            conn.prepare("UPDATE review_comment SET resolved = 1 WHERE task_id = ?1 AND id = ?2")?;
+        for comment_id in comment_ids {
+            stmt.execute(params![task_id, comment_id])?;
+        }
+        Ok::<_, AppError>(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_review_comment(
+    conn: &Connection,
+    comment_id: &str,
+) -> Result<Option<ReviewComment>, AppError> {
+    let changed = conn.execute(
+        "UPDATE review_comment SET resolved = 1 WHERE id = ?1",
+        params![comment_id],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+         FROM review_comment WHERE id = ?1",
+        params![comment_id],
+        row_to_review_comment,
+    )
+    .optional()
+    .map_err(AppError::from)
+}
+
+fn row_to_review_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComment> {
+    Ok(ReviewComment {
+        id: row.get(0)?,
+        task_id: row.get(1)?,
+        turn_id: row.get(2)?,
+        file_path: row.get(3)?,
+        line_number: row.get(4)?,
+        side: row.get(5)?,
+        body: row.get(6)?,
+        resolved: row.get::<_, i64>(7)? != 0,
+        created_at: row.get(8)?,
+    })
+}
+
+pub fn select_tasks_by_project(conn: &Connection, project_id: &str) -> Result<Vec<Task>, AppError> {
     let sql = format!("{TASK_SELECT} WHERE project_id = ?1 ORDER BY created_at DESC");
     let mut stmt = conn.prepare(&sql)?;
     let tasks = stmt
@@ -338,11 +588,9 @@ pub fn update_draft_task(
     now: &str,
 ) -> Result<(), AppError> {
     let status: Option<String> = conn
-        .query_row(
-            "SELECT status FROM task WHERE id = ?1",
-            params![id],
-            |r| r.get(0),
-        )
+        .query_row("SELECT status FROM task WHERE id = ?1", params![id], |r| {
+            r.get(0)
+        })
         .optional()?;
 
     match status.as_deref() {
@@ -430,13 +678,47 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 5, "all five schema tables must exist after migration");
+        assert_eq!(
+            count, 5,
+            "all five schema tables must exist after migration"
+        );
     }
 
     #[test]
     fn migration_is_idempotent() {
         let (_dir, conn) = setup();
         run_migrations(&conn).expect("second migration pass must be a no-op");
+    }
+
+    #[test]
+    fn settings_defaults_and_atomic_update_roundtrip() {
+        let (_dir, mut conn) = setup();
+        assert_eq!(select_settings(&conn).unwrap(), AppSettings::default());
+
+        let updated = AppSettings {
+            codex_bin: "C:/tools/codex.exe".to_string(),
+            git_bin: "C:/tools/git.exe".to_string(),
+            max_concurrent_tasks: 6,
+            merge_on_confirm: true,
+            ..AppSettings::default()
+        };
+        replace_settings(&mut conn, &updated).unwrap();
+        assert_eq!(select_settings(&conn).unwrap(), updated);
+        assert_eq!(
+            select_settings(&conn).unwrap().sandbox_mode,
+            "workspace-write"
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_concurrency_falls_back_safely() {
+        let (_dir, conn) = setup();
+        conn.execute(
+            "UPDATE settings SET value = '0' WHERE key = 'max_concurrent_tasks'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(select_settings(&conn).unwrap().max_concurrent_tasks, 2);
     }
 
     #[test]
@@ -466,7 +748,10 @@ mod tests {
         let (_dir, conn) = setup();
         insert_project(&conn, &project("p1", "/tmp/repo")).unwrap();
         let err = insert_project(&conn, &project("p2", "/tmp/repo"));
-        assert!(err.is_err(), "duplicate root_path must violate UNIQUE constraint");
+        assert!(
+            err.is_err(),
+            "duplicate root_path must violate UNIQUE constraint"
+        );
     }
 
     #[test]
@@ -519,7 +804,14 @@ mod tests {
         t.status = "running".to_string();
         insert_task(&conn, &t).unwrap();
 
-        let err = update_draft_task(&conn, "t1", Some("New title"), None, None, "2024-06-01T00:00:00Z");
+        let err = update_draft_task(
+            &conn,
+            "t1",
+            Some("New title"),
+            None,
+            None,
+            "2024-06-01T00:00:00Z",
+        );
         assert!(err.is_err());
         assert!(
             matches!(err.unwrap_err(), AppError::InvalidOperation(_)),
@@ -543,8 +835,121 @@ mod tests {
         delete_task_by_id(&conn, "t1").unwrap();
 
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM turn WHERE task_id = 't1'", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM turn WHERE task_id = 't1'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(n, 0, "ON DELETE CASCADE must remove child turns");
+    }
+
+    #[test]
+    fn review_comment_roundtrip_and_resolution() {
+        let (_dir, conn) = setup();
+        insert_project(&conn, &project("p1", "/tmp/repo")).unwrap();
+        insert_task(&conn, &task("t1", "p1")).unwrap();
+        insert_turn(
+            &conn,
+            "turn-1",
+            "t1",
+            "initial",
+            "prompt",
+            "completed",
+            "/tmp/log",
+            "2024-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let comment = ReviewComment {
+            id: "c1".to_string(),
+            task_id: "t1".to_string(),
+            turn_id: "turn-1".to_string(),
+            file_path: "src/main.rs".to_string(),
+            line_number: Some(12),
+            side: Some("new".to_string()),
+            body: "Handle the error here".to_string(),
+            resolved: false,
+            created_at: "2024-01-01T00:01:00Z".to_string(),
+        };
+        insert_review_comment(&conn, &comment).unwrap();
+
+        assert_eq!(
+            select_latest_turn_id(&conn, "t1").unwrap().as_deref(),
+            Some("turn-1")
+        );
+        let listed = select_review_comments(&conn, "t1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(!listed[0].resolved);
+
+        let resolved = resolve_review_comment(&conn, "c1").unwrap().unwrap();
+        assert!(resolved.resolved);
+    }
+
+    #[test]
+    fn follow_up_lifecycle_resolves_only_submitted_comments() {
+        let (_dir, conn) = setup();
+        insert_project(&conn, &project("p1", "/tmp/repo")).unwrap();
+        let mut t = task("t1", "p1");
+        t.status = "awaiting_review".to_string();
+        insert_task(&conn, &t).unwrap();
+        insert_turn(
+            &conn,
+            "turn-1",
+            "t1",
+            "initial",
+            "prompt",
+            "completed",
+            "/tmp/initial.log",
+            "2024-01-01T00:00:00Z",
+        )
+        .unwrap();
+        for id in ["c1", "c2"] {
+            insert_review_comment(
+                &conn,
+                &ReviewComment {
+                    id: id.to_string(),
+                    task_id: "t1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    file_path: "src/main.rs".to_string(),
+                    line_number: None,
+                    side: None,
+                    body: format!("feedback {id}"),
+                    resolved: false,
+                    created_at: format!("2024-01-01T00:01:0{}Z", &id[1..]),
+                },
+            )
+            .unwrap();
+        }
+
+        begin_follow_up(
+            &conn,
+            "t1",
+            "turn-2",
+            "follow-up prompt",
+            "/tmp/follow-up.log",
+            "2024-01-01T00:02:00Z",
+        )
+        .unwrap();
+        assert_eq!(select_task(&conn, "t1").unwrap().unwrap().status, "running");
+
+        resolve_review_comments(&conn, "t1", &["c1".to_string()]).unwrap();
+        let unresolved = select_unresolved_review_comments(&conn, "t1").unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].id, "c2");
+    }
+
+    #[test]
+    fn approval_clears_worktree_and_can_preserve_branch() {
+        let (_dir, conn) = setup();
+        insert_project(&conn, &project("p1", "/tmp/repo")).unwrap();
+        let mut t = task("t1", "p1");
+        t.status = "awaiting_review".to_string();
+        t.worktree_path = Some("/tmp/worktree".to_string());
+        t.branch_name = Some("task/t1".to_string());
+        insert_task(&conn, &t).unwrap();
+
+        approve_task(&conn, "t1", true, "2024-01-01T00:03:00Z").unwrap();
+        let approved = select_task(&conn, "t1").unwrap().unwrap();
+        assert_eq!(approved.status, "approved");
+        assert!(approved.worktree_path.is_none());
+        assert_eq!(approved.branch_name.as_deref(), Some("task/t1"));
     }
 }

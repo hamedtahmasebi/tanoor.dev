@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::{process::Command, sync::Mutex};
 
 use chrono::Utc;
 use tauri::State;
@@ -8,7 +8,7 @@ use crate::{
     db,
     error::AppError,
     execution::{self, RunState},
-    models::{Project, Task},
+    models::{AppSettings, Project, ReviewComment, Task},
     runner,
     worktree::WorktreeManager,
 };
@@ -21,6 +21,21 @@ use crate::{
 /// async command executor threads.  `rusqlite::Connection` is `Send` but not
 /// `Sync`; the Mutex provides the required `Sync`.
 pub struct DbState(pub Mutex<rusqlite::Connection>);
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BinaryHealthStatus {
+    binary_found: bool,
+    version: Option<String>,
+    detail: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemHealthStatus {
+    codex: runner::HealthStatus,
+    git: BinaryHealthStatus,
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -74,15 +89,19 @@ fn validate_project_root(root_path: &str) -> Result<(), AppError> {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub fn create_project(
-    state: State<'_, DbState>,
-    root_path: String,
-) -> Result<Project, AppError> {
+pub fn create_project(state: State<'_, DbState>, root_path: String) -> Result<Project, AppError> {
     validate_project_root(&root_path)?;
 
     // Enforce the git-repository requirement (Phase III).
     // WorktreeManager::is_git_repo shells out to `git rev-parse --git-dir`.
-    let wm = WorktreeManager::default();
+    let git_bin = {
+        let conn = state
+            .0
+            .lock()
+            .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+        db::select_settings(&conn)?.git_bin
+    };
+    let wm = WorktreeManager::new(git_bin);
     if !wm.is_git_repo(std::path::Path::new(&root_path)) {
         return Err(AppError::InvalidOperation(format!(
             "'{root_path}' is not a git repository. \
@@ -139,7 +158,9 @@ pub fn create_task(
     let conn = state.0.lock().unwrap();
 
     if db::select_project(&conn, &project_id)?.is_none() {
-        return Err(AppError::NotFound(format!("Project '{project_id}' not found")));
+        return Err(AppError::NotFound(format!(
+            "Project '{project_id}' not found"
+        )));
     }
 
     let now_str = now();
@@ -164,10 +185,7 @@ pub fn create_task(
 }
 
 #[tauri::command]
-pub fn list_tasks(
-    state: State<'_, DbState>,
-    project_id: String,
-) -> Result<Vec<Task>, AppError> {
+pub fn list_tasks(state: State<'_, DbState>, project_id: String) -> Result<Vec<Task>, AppError> {
     let conn = state.0.lock().unwrap();
     db::select_tasks_by_project(&conn, &project_id)
 }
@@ -235,13 +253,92 @@ pub fn update_task_prompt(
 /// environment variables.  Safe to call at any time — it does not make
 /// network requests.
 ///
-/// `codex_bin` overrides the binary name/path; when `null` the default
-/// `"codex"` is used.  Phase VIII settings will populate this field from
-/// the user's stored preference.
 #[tauri::command]
-pub fn check_codex_health(codex_bin: Option<String>) -> runner::HealthStatus {
-    let bin = codex_bin.as_deref().unwrap_or("codex");
-    runner::health_check(bin)
+pub fn check_codex_health(state: State<'_, DbState>) -> Result<runner::HealthStatus, AppError> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    let settings = db::select_settings(&conn)?;
+    Ok(runner::health_check(&settings.codex_bin))
+}
+
+#[tauri::command]
+pub fn get_settings(state: State<'_, DbState>) -> Result<AppSettings, AppError> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    db::select_settings(&conn)
+}
+
+#[tauri::command]
+pub fn update_settings(
+    state: State<'_, DbState>,
+    runs: State<'_, RunState>,
+    codex_bin: String,
+    git_bin: String,
+    max_concurrent_tasks: usize,
+    merge_on_confirm: bool,
+) -> Result<AppSettings, AppError> {
+    let codex_bin = codex_bin.trim().to_string();
+    let git_bin = git_bin.trim().to_string();
+    if codex_bin.is_empty() || git_bin.is_empty() {
+        return Err(AppError::InvalidOperation(
+            "Codex and git binary paths cannot be empty".to_string(),
+        ));
+    }
+    if !(1..=16).contains(&max_concurrent_tasks) {
+        return Err(AppError::InvalidOperation(
+            "Maximum concurrent tasks must be between 1 and 16".to_string(),
+        ));
+    }
+    let settings = AppSettings {
+        codex_bin,
+        git_bin,
+        max_concurrent_tasks,
+        merge_on_confirm,
+        ..AppSettings::default()
+    };
+    let mut conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    db::replace_settings(&mut conn, &settings)?;
+    runs.set_max_concurrent(max_concurrent_tasks);
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn check_system_health(state: State<'_, DbState>) -> Result<SystemHealthStatus, AppError> {
+    let settings = {
+        let conn = state
+            .0
+            .lock()
+            .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+        db::select_settings(&conn)?
+    };
+    let git = match Command::new(&settings.git_bin).arg("--version").output() {
+        Ok(output) if output.status.success() => BinaryHealthStatus {
+            binary_found: true,
+            version: Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            detail: None,
+        },
+        Ok(output) => BinaryHealthStatus {
+            binary_found: true,
+            version: None,
+            detail: Some(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        },
+        Err(error) => BinaryHealthStatus {
+            binary_found: false,
+            version: None,
+            detail: Some(error.to_string()),
+        },
+    };
+    Ok(SystemHealthStatus {
+        codex: runner::health_check(&settings.codex_bin),
+        git,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -256,19 +353,145 @@ pub fn run_task(
     app: tauri::AppHandle,
     runs: tauri::State<'_, RunState>,
     task_id: String,
-    codex_bin: Option<String>,
 ) -> Result<Task, AppError> {
-    execution::start_task(&app, &runs, task_id, codex_bin)
+    execution::start_task(&app, &runs, task_id)
 }
 
 /// Cancel the active Codex process tree. The background consumer computes and
 /// persists the partial diff before publishing the cancelled state.
 #[tauri::command]
-pub fn cancel_task(
+pub fn cancel_task(runs: tauri::State<'_, RunState>, task_id: String) -> Result<(), AppError> {
+    execution::cancel_task(&runs, &task_id)
+}
+
+// ---------------------------------------------------------------------------
+// Review commands
+// ---------------------------------------------------------------------------
+
+fn validate_comment_anchor(
+    file_path: &str,
+    line_number: Option<i64>,
+    side: Option<&str>,
+    body: &str,
+) -> Result<(), AppError> {
+    validate_file_ref(file_path)?;
+    if file_path.trim().is_empty() {
+        return Err(AppError::InvalidOperation(
+            "Review comment file path cannot be empty".to_string(),
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err(AppError::InvalidOperation(
+            "Review comment body cannot be empty".to_string(),
+        ));
+    }
+    match (line_number, side) {
+        (None, None) => Ok(()),
+        (Some(line), Some("old" | "new")) if line > 0 => Ok(()),
+        (Some(line), _) if line <= 0 => Err(AppError::InvalidOperation(
+            "Review comment line number must be positive".to_string(),
+        )),
+        (Some(_), _) => Err(AppError::InvalidOperation(
+            "Line comments must specify side 'old' or 'new'".to_string(),
+        )),
+        (None, Some(_)) => Err(AppError::InvalidOperation(
+            "File-level comments cannot specify a diff side".to_string(),
+        )),
+    }
+}
+
+#[tauri::command]
+pub fn add_review_comment(
+    state: State<'_, DbState>,
+    task_id: String,
+    file_path: String,
+    line_number: Option<i64>,
+    side: Option<String>,
+    body: String,
+) -> Result<ReviewComment, AppError> {
+    validate_comment_anchor(&file_path, line_number, side.as_deref(), &body)?;
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    let task = db::select_task(&conn, &task_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Task '{task_id}' not found")))?;
+    if !matches!(
+        task.status.as_str(),
+        "awaiting_review" | "changes_requested"
+    ) {
+        return Err(AppError::InvalidOperation(format!(
+            "Task '{task_id}' is not available for review"
+        )));
+    }
+    let turn_id = db::select_latest_turn_id(&conn, &task_id)?.ok_or_else(|| {
+        AppError::InvalidOperation(format!("Task '{task_id}' has no turn to review"))
+    })?;
+    let comment = ReviewComment {
+        id: Uuid::new_v4().to_string(),
+        task_id,
+        turn_id,
+        file_path,
+        line_number,
+        side,
+        body: body.trim().to_string(),
+        resolved: false,
+        created_at: now(),
+    };
+    db::insert_review_comment(&conn, &comment)?;
+    Ok(comment)
+}
+
+#[tauri::command]
+pub fn resolve_review_comment(
+    state: State<'_, DbState>,
+    comment_id: String,
+) -> Result<ReviewComment, AppError> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    db::resolve_review_comment(&conn, &comment_id)?
+        .ok_or_else(|| AppError::NotFound(format!("Review comment '{comment_id}' not found")))
+}
+
+#[tauri::command]
+pub fn list_review_comments(
+    state: State<'_, DbState>,
+    task_id: String,
+) -> Result<Vec<ReviewComment>, AppError> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    if db::select_task(&conn, &task_id)?.is_none() {
+        return Err(AppError::NotFound(format!("Task '{task_id}' not found")));
+    }
+    db::select_review_comments(&conn, &task_id)
+}
+
+/// Package unresolved comments and an optional note into one structured
+/// follow-up prompt, then resume the task's existing Codex thread.
+#[tauri::command]
+pub fn request_changes(
+    app: tauri::AppHandle,
     runs: tauri::State<'_, RunState>,
     task_id: String,
-) -> Result<(), AppError> {
-    execution::cancel_task(&runs, &task_id)
+    reviewer_note: Option<String>,
+) -> Result<Task, AppError> {
+    execution::start_follow_up(&app, &runs, task_id, reviewer_note)
+}
+
+/// Commit a reviewed task, optionally merge its branch into the current main
+/// checkout, remove its worktree, and persist the approved state.
+#[tauri::command]
+pub fn confirm_task(
+    app: tauri::AppHandle,
+    runs: tauri::State<'_, RunState>,
+    task_id: String,
+    merge: bool,
+) -> Result<Task, AppError> {
+    execution::confirm_task(&app, &runs, &task_id, merge)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,5 +532,15 @@ mod tests {
         let err = validate_project_root("/this/path/does/not/exist/12345");
         assert!(err.is_err());
         assert!(matches!(err.unwrap_err(), AppError::InvalidOperation(_)));
+    }
+
+    #[test]
+    fn review_comment_anchor_validation() {
+        validate_comment_anchor("src/main.rs", Some(4), Some("new"), "Please adjust").unwrap();
+        validate_comment_anchor("src/main.rs", None, None, "File-level note").unwrap();
+        assert!(validate_comment_anchor("src/main.rs", Some(0), Some("new"), "body").is_err());
+        assert!(validate_comment_anchor("src/main.rs", Some(1), Some("right"), "body").is_err());
+        assert!(validate_comment_anchor("src/main.rs", None, Some("old"), "body").is_err());
+        assert!(validate_comment_anchor("src/main.rs", Some(1), Some("old"), "  ").is_err());
     }
 }

@@ -1,4 +1,4 @@
-# Forge v1 implementation status
+# Tanoor v1 implementation status
 
 This is the cross-conversation handoff file. The full phase specifications live in [docs/PHASES.md](docs/PHASES.md) and `docs/phases/`.
 
@@ -9,19 +9,19 @@ This is the cross-conversation handoff file. The full phase specifications live 
 | [III — Git worktrees](docs/phases/phase-III-git-worktrees.md) | Repository/worktree/diff/commit helpers | **Implemented; validation pending** |
 | [IV — Codex runner](docs/phases/phase-IV-codex-runner.md) | Codex process, JSONL, logs, health, cancellation | **Implemented; validation pending** |
 | [V — Execution orchestration](docs/phases/phase-V-execution-orchestration.md) | Run lifecycle, streaming, concurrency | **Implemented; validation passed** |
-| [VI — Diff review UI](docs/phases/phase-VI-diff-review-ui.md) | Diff display, inline comments, review actions | Pending |
-| [VII — Follow-up loop](docs/phases/phase-VII-follow-up-loop.md) | Resume turns, confirmation, cleanup | Pending |
-| [VIII — Settings](docs/phases/phase-VIII-settings.md) | Binary status, concurrency, merge preferences | Pending |
-| [IX — Packaging](docs/phases/phase-IX-packaging.md) | Windows installer and cross-platform smoke checks | Pending |
+| [VI — Diff review UI](docs/phases/phase-VI-diff-review-ui.md) | Diff display, inline comments, review actions | **Implemented; validation passed** |
+| [VII — Follow-up loop](docs/phases/phase-VII-follow-up-loop.md) | Resume turns, confirmation, cleanup | **Implemented; validation passed** |
+| [VIII — Settings](docs/phases/phase-VIII-settings.md) | Binary status, concurrency, merge preferences | **Implemented; validation passed** |
+| [IX — Packaging](docs/phases/phase-IX-packaging.md) | Windows installer and cross-platform smoke checks | **Implemented; validation passed** |
 
 ## Current handoff
 
-- Current phase: **V — Execution orchestration** (implemented; validation passed)
-- Next phase: **VI — Diff review UI**
-- Proposal baseline: `project-proposal.md`, Batch 3
+- Current phase: **IX — Packaging** (implemented; validation passed)
+- Next phase: **v1 implementation complete**
+- Proposal baseline: `project-proposal.md`, Batch 8
 - Functional scope changes: the frontend is now an editor-first desktop toolchain UI. The dashboard/card shell was replaced with a compact activity rail, project/task tree, inline task composer, command palette, and `@` project-file / `/` command suggestions.
 - UI validation: `npm run build` passes. In-app browser visual smoke test was unavailable in this environment because no browser surface is connected.
-- Smoke-test item carried forward: verify empirically whether the pinned Codex CLI accepts `--json`/`--sandbox`/`--full-auto` on `resume` (see Phase IV handoff below)
+- Codex CLI 0.151.0 verification: `--json` and `--sandbox workspace-write` are accepted for initial and resumed turns; the removed `--full-auto` flag is not passed
 
 ---
 
@@ -66,7 +66,7 @@ All commands live in `src-tauri/src/commands.rs` and are registered with `tauri:
 
 ### JS/TS invoke parameter naming
 
-Rust command parameters are **snake_case**; they must be passed with matching snake_case keys from JavaScript (Tauri v2 does **not** automatically convert camelCase to snake_case for command arguments). Return values use **camelCase** because the Rust structs carry `#[serde(rename_all = "camelCase")]`.
+Rust command parameters are written in **snake_case**, but Tauri v2's command macro expects **camelCase** argument keys from JavaScript by default. For example, Rust's `task_id` and `file_refs` parameters are invoked as `taskId` and `fileRefs`. Return values also use **camelCase** because the Rust structs carry `#[serde(rename_all = "camelCase")]`.
 
 The `src/api.ts` wrapper layer handles this translation.
 
@@ -75,7 +75,7 @@ The `src/api.ts` wrapper layer handles this translation.
 ```
 src/
   types.ts                    — Project, Task, TaskStatus, CreateTaskInput, UpdateTaskInput
-  api.ts                      — typed invoke() wrappers (snake_case args → camelCase response)
+  api.ts                      — typed invoke() wrappers (camelCase args and responses)
   store.ts                    — Zustand store: projects, tasks, loading flags, all actions
   App.tsx                     — editor-first shell; activity rail, project/task tree, task detail, command palette
   components/
@@ -158,8 +158,8 @@ No new Cargo dependencies — uses `std::process::Command`, `std::thread`, and `
 
 | Operation | Argv | Notes |
 |---|---|---|
-| Initial turn | `codex exec --json --sandbox workspace-write --full-auto "<prompt>"` | cwd = task worktree |
-| Resume (`resume_with_flags=true`) | `codex exec --json --sandbox workspace-write --full-auto resume <thread_id> "<prompt>"` | Default path |
+| Initial turn | `codex exec --json --sandbox workspace-write "<prompt>"` | cwd = task worktree |
+| Resume (`resume_with_flags=true`) | `codex exec --json --sandbox workspace-write resume <thread_id> "<prompt>"` | Default path |
 | Resume (`resume_with_flags=false`) | `codex exec resume <thread_id> "<prompt>"` | Fallback if CLI rejects flags on resume |
 
 ### JSONL event types
@@ -197,23 +197,19 @@ After `RunHandle::cancel()` the `EventStream` drains to empty as the I/O threads
 
 | Command | Signature | JS invoke name |
 |---|---|---|
-| `check_codex_health` | `(codex_bin: Option<String>) → HealthStatus` | `check_codex_health` |
+| `check_codex_health` | `() → HealthStatus` using persisted settings | `check_codex_health` |
 
 `HealthStatus` fields (camelCase in JSON): `binaryFound`, `version`, `authEnvPresent`, `detail`.
 
-### ⚠ Pinned CLI version and `resume` flag smoke-test
+### Pinned CLI version and `resume` flag smoke-test
 
-The `resume_with_flags` field defaults to `true` (pass `--json --sandbox --full-auto` on resume). **This must be verified empirically against the pinned Codex CLI version before Phase V depends on it.** Some builds reject those flags on `resume` and honour only the flags from the initial turn.
+Verified with `codex-cli 0.151.0`: the `resume_with_flags` default path (`--json --sandbox workspace-write`) is accepted for `codex exec resume`. The obsolete `--full-auto` flag is rejected by this CLI and is intentionally not passed.
 
-Procedure (after `npm run tauri dev` works):
-1. Create a task, run it, note the thread_id.
-2. Check that `codex exec --json --sandbox workspace-write --full-auto resume <thread_id> "follow up"` exits 0 and produces JSONL output.
-3. If it exits non-zero with `"unknown argument '--json'"` or similar, set `resume_with_flags = false` in the runner and re-test.
-4. Record the exact `codex --version` string and the resume flag behavior in this document.
+If a future pinned CLI rejects structured flags on resume, set `resume_with_flags = false` in the runner and repeat the resume smoke test.
 
 ### Tests
 
-All tests live in `src-tauri/src/runner.rs`.
+Runner tests live in `src-tauri/src/runner.rs`; orchestration error-formatting tests live in `src-tauri/src/execution.rs`.
 
 | Test | Covers |
 |---|---|
@@ -230,8 +226,11 @@ All tests live in `src-tauri/src/runner.rs`.
 | `thread_id_returns_none_for_non_thread_started` | No false positives on thread_id |
 | `health_check_missing_binary` | Binary-not-found is reported cleanly |
 | `runner_default_settings` | Defaults are `"codex"` + flags enabled |
+| `current_cli_arguments_do_not_use_full_auto` | Initial and resume argv use only current supported flags |
+| `process_failure_captures_stderr` | Non-JSON subprocess failures retain stderr and exit code |
 | `io_threads_stream_and_log_events` (¹) | Full I/O thread pipeline: events received + log written |
 | `invalid_lines_are_silently_skipped` (¹) | Non-JSONL lines are silently dropped |
+| `non_terminal_exit_reports_stderr` | Orchestration exposes concrete CLI stderr instead of a generic failure |
 
 (¹) Unix only — uses `sh -c 'printf ...'` to emit fake JSONL.
 
@@ -279,7 +278,7 @@ src-tauri/src/
 
 - `git worktree add` fails if the branch name already exists. Phase V reports stale worktree paths clearly; automatic recovery of an orphaned branch remains deferred.
 - `git merge --no-ff` may fail with a conflict. Conflict handling is deferred to Phase VII.
-- The `git` binary path defaults to `"git"` (PATH lookup). Phase VIII settings will add a configurable override.
+- The `git` binary path defaults to `"git"` (PATH lookup) and can be overridden in persisted settings.
 - Worktree tests require `git` on the host PATH. If unavailable, the test harness will panic early with a clear message.
 
 ### Tests
@@ -316,10 +315,10 @@ src-tauri/src/execution.rs now owns the run lifecycle and is registered as manag
 
 | Command | Signature | Behavior |
 |---|---|---|
-| run_task | (task_id: String, codex_bin: Option<String>) -> Task | Captures project HEAD, creates app-data/worktrees/task_id on task/task_id, inserts an initial running turn, then starts Codex in the worktree |
+| run_task | (task_id: String) -> Task | Loads persisted binaries, captures project HEAD, creates app-data/worktrees/task_id on task/task_id, inserts an initial running turn, then starts Codex in the worktree |
 | cancel_task | (task_id: String) -> () | Kills the registered process tree; the worker preserves and stores the partial cumulative diff |
 
-The frontend event channel is task:{id}:event. Each Codex event is forwarded as an object with taskId, turnId, eventType, raw, status, diff, and error. A final forge.task.updated payload carries the terminal task status and cached diff.
+Each Codex event is forwarded on both the task-scoped `task:{id}:event` channel and the global `forge:task-event` companion channel as an object with taskId, turnId, eventType, raw, status, diff, and error. The global channel keeps background tasks synchronized when they are not selected. A final forge.task.updated payload carries the terminal task status and cached diff.
 
 ### State transitions
 
@@ -327,6 +326,7 @@ The frontend event channel is task:{id}:event. Each Codex event is forwarded as 
 |---|---|---|
 | run setup | running | running |
 | turn.completed | completed | awaiting_review |
+| turn.completed + diff failure | completed | failed |
 | turn.failed | failed | failed |
 | process exits without a terminal event | failed | failed |
 | cancel_task | cancelled | cancelled |
@@ -339,11 +339,142 @@ Migration 2 adds task.diff for the cached cumulative unified diff and upgrades d
 
 ### Frontend
 
-The typed API exposes runTask and cancelTask, the Zustand store retains the last 200 task events, and App listens to the selected task event channel. The execution dock enables Run/Cancel and displays live event names; the existing raw diff area displays the cached cumulative diff.
+The typed API exposes runTask and cancelTask, the Zustand store retains the last 200 events per task, and App listens once to the global task-event channel. The execution dock enables Run/Cancel/Review and displays live event names; Phase VI renders the cached cumulative diff through the structured review dialog.
 
 ### Tests and recovery
 
 The Rust suite passes with 41 tests, including default concurrency and duplicate-run reservation checks. Setup failures release the concurrency slot and remove a newly-created worktree. Codex spawn failures mark the turn and task failed and remove the worktree. A stale worktree path is reported clearly and is not overwritten.
+
+## Phase VI details
+
+### Review data and commands
+
+`ReviewComment` mirrors the existing `review_comment` table. Line comments use a one-based line number plus side `old` or `new`; file-level comments store both fields as null. New comments are attached by the backend to the latest turn for the task, and are accepted only while the task is `awaiting_review` or `changes_requested`.
+
+| Command | Result |
+|---|---|
+| `add_review_comment` | Validates the relative file path, anchor, and non-empty body, then returns the persisted comment |
+| `resolve_review_comment` | Marks one comment resolved and returns its updated representation |
+| `list_review_comments` | Returns all task comments in creation order, including resolved history |
+
+### Parsed diff model and anchoring
+
+`src/diff.ts` parses cumulative unified diff text into files, hunks, and lines. Files retain old/new paths, added/deleted/modified/renamed status, binary state, and addition/deletion totals. Hunks retain both ranges. Every rendered source line carries nullable old and new one-based line numbers.
+
+- Added lines anchor to `new`; deleted lines anchor to `old`.
+- Context lines expose both old and new anchors.
+- File comments use the displayed task path with null line and side.
+- Renamed files display both paths and store comments against the new path; deleted files use the old path.
+- Comments remain tied to the turn that was current when they were created, so Phase VII can collect unresolved review feedback without losing history.
+
+### Store and UI contracts
+
+The Zustand store owns `reviewComments`, `reviewModal`, and the promise-based `openReview`, `loadReviewComments`, `addReviewComment`, and `resolveReviewComment` actions. `setReviewStep` coordinates the review, confirm, and request-changes screens. Phase VII supplies the verdict execution actions.
+
+The review dialog provides expandable file/hunk display, inline old/new line buttons, file comments, resolution controls, totals, and verdict controls. Added, removed, and renamed parser fixtures run through the zero-dependency `npm test` script.
+
+### Phase V review fixes included
+
+- Added the global task-event channel so non-selected background tasks no longer remain stale in the sidebar.
+- A completed Codex turn is no longer marked `awaiting_review` when diff collection fails; the task becomes `failed` and emits the concrete error.
+- Non-terminal CLI exits preserve exit code and bounded stderr details instead of reporting only a generic failure.
+
+### Validation
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **47 passed**.
+- `npm test`: added/removed/renamed fixtures passed.
+- `npm run build`: TypeScript and Vite production build passed.
+- `git diff --check`: passed.
+- In-app browser visual smoke test: unavailable because no browser surface was connected.
+
+## Phase VII details
+
+### Request-changes prompt and execution
+
+`request_changes` accepts the task ID and an optional reviewer note, then loads the persisted Codex/git paths. The backend reads unresolved comments in creation order and formats one follow-up prompt with a JSON object containing `comments` (`filePath`, nullable `lineNumber`, nullable `side`, and `body`) plus nullable `reviewerNote`. An empty comment set plus a blank note is rejected.
+
+The command reserves a normal concurrency slot, validates the stored thread/base/worktree metadata, inserts a `follow_up` turn, moves the task to `running`, and invokes `codex exec --json --sandbox workspace-write resume <thread_id> <prompt>`. The existing stream consumer then repeats the JSONL event, terminal-state, and cumulative-diff pipeline.
+
+Submitted comments are marked resolved only after the resume process starts. If preparation or process launch fails, the task becomes `changes_requested`, the attempted turn is failed when one exists, the comments remain unresolved, and the same feedback can be retried without duplication. After a successful start, the frontend closes review and follows the global task event stream back to `awaiting_review`.
+
+### Confirmation ordering and recovery
+
+`confirm_task` requires `awaiting_review` with no unresolved comments. Its ordering is:
+
+1. Validate project, worktree, and branch metadata.
+2. Stage and commit all task changes with `Tanoor: <task title>` (or reuse HEAD when nothing changed).
+3. Optionally merge the task branch into the main checkout with `--no-ff`.
+4. Remove the linked worktree; delete the task branch only when it was merged.
+5. Mark the task `approved`, clear `worktree_path`, and retain `branch_name` only for the default unmerged path.
+
+Merge-on-confirm is exposed in the confirmation screen and initializes from the persisted preference (off by default). A merge conflict triggers `git merge --abort`; the reviewed task remains `awaiting_review` with its branch and worktree intact. Commit, merge, or worktree-removal failures likewise leave the task reviewable so confirmation can be retried. Cleanup errors explicitly state that the commit already succeeded. The extremely narrow case where all Git cleanup succeeds but the final SQLite approval write fails is reported as a database error; the branch commit remains recoverable through Git.
+
+### Store and UI contracts
+
+The typed frontend API now exposes `requestChanges` and `confirmTask`. Zustand owns `isSubmittingReview`, retires submitted comments in local state, updates the returned running/approved task, and keeps failed verdict screens open with the backend recovery error in the app banner. The request screen accepts an optional note; the confirmation screen offers an explicit merge checkbox and explains whether the task branch will be preserved.
+
+### Validation
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **53 passed**.
+- `npm test`: added/removed/renamed diff fixtures passed.
+- `npm run build`: TypeScript and Vite production build passed.
+- `git diff --check`: passed.
+- In-app browser visual smoke test: unavailable because no browser surface was connected.
+
+## Phase VIII details
+
+### Persistence and commands
+
+Migration 3 seeds `codex_bin=codex`, `git_bin=git`, `max_concurrent_tasks=2`, and `merge_on_confirm=false` in the existing key/value settings table. `AppSettings.sandbox_mode` is always returned as `workspace-write`; it is intentionally not writable or accepted by `update_settings`.
+
+| Command | Behavior |
+|---|---|
+| `get_settings` | Returns persisted settings plus the fixed sandbox policy |
+| `update_settings` | Atomically persists trimmed binary paths, concurrency 1–16, and merge preference |
+| `check_system_health` | Detects Codex/git versions and Codex environment or CLI-login authentication |
+| `check_codex_health` | Compatibility health endpoint using the persisted Codex path |
+
+No restart is required. Binary updates apply to the next operation. The concurrency limit is held in an atomic managed value and changes immediately for new reservations without cancelling active tasks. Corrupt or out-of-range persisted concurrency falls back to 2.
+
+### Execution integration
+
+All paths now use the persisted settings: project repository validation, initial and resumed Codex turns, worktree setup/cleanup, diff capture, commits, and merges. Each running operation retains its initial binary snapshot. The review confirmation checkbox starts from `merge_on_confirm`, but remains adjustable per task.
+
+### Settings UI and health
+
+The activity-rail settings button and sidebar Codex row open a settings dialog with tool paths, detected versions, Codex authentication state, concurrency, merge preference, and the read-only `workspace-write` boundary. Saving refreshes health in place and confirms that no restart is needed. Binary paths only require non-empty values so a missing/custom path can be persisted and diagnosed through the adjacent health result.
+
+### Validation
+
+- `cargo test --manifest-path src-tauri/Cargo.toml`: **56 passed**.
+- `npm test`: diff fixtures passed.
+- `npm run build`: TypeScript and Vite production build passed.
+- In-app browser visual smoke test: pending because the environment has no connected browser surface.
+
+## Phase IX details
+
+### Windows packaging
+
+`src-tauri/tauri.windows.conf.json` is automatically merged on Windows and replaces the shared `all` target list with `msi` and `nsis`. Both bundles block downgrades and use the WebView2 download bootstrapper. MSI localization is `en-US` and its upgrade code is pinned to `8aa41bb8-5fd1-53bc-9824-773847b416c6`; NSIS is an English, LZMA-compressed, current-user install with Tanoor installer icons.
+
+Shared bundle metadata now includes publisher, developer-tool category, descriptions, and Windows/macOS/general icon sources. `npm run bundle:windows` is the Windows build entry point. The generated installers remain ignored build artifacts under `src-tauri/target/release/bundle/`.
+
+### Artifact and release verification
+
+`scripts/verify-windows-bundle.ps1` fails unless it finds at least one MSI and one NSIS setup executable, then reports byte size, Authenticode state, and SHA-256. `-RequireSigned` turns a missing or invalid signature into a release failure. Signing itself is deliberately unconfigured; `docs/RELEASE_CHECKLIST.md` documents the native certificate fields and custom `signCommand` integration without storing credentials.
+
+The release checklist covers clean install, GUI launch, Settings health/PATH fallback, a full run/review flow, process-tree cancellation, in-place upgrade, downgrade rejection, uninstall, and retained user data. Equivalent Linux and macOS checks target desktop-launched PATH differences and Unix process-group termination.
+
+### Validation
+
+- Host/toolchain: Windows `10.0.26200` x64; WebView2 `151.0.4129.107`; Node `24.10.0`; npm `11.6.1`; Rust/Cargo `1.98.0`; Tauri CLI `2.11.4`; Tauri crate `2.11.5`.
+- `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`: passed.
+- `cargo test --manifest-path src-tauri/Cargo.toml --quiet`: **56 passed**.
+- `npm test`: diff fixtures passed.
+- `npm run build`: TypeScript and Vite production build passed.
+- `npm run bundle:windows`: built `Tanoor_0.1.0_x64_en-US.msi` and `Tanoor_0.1.0_x64-setup.exe`.
+- Artifact verification: both formats found; unsigned as expected; hashes recorded in `docs/phases/phase-IX-packaging.md`.
+- Clean VM and secondary-OS checks remain explicit release gates because Windows 10/11 VM, Linux, and macOS hosts were not available in this implementation environment.
 
 ## Decisions and carried-forward risks
 
@@ -351,7 +482,6 @@ The Rust suite passes with 41 tests, including default concurrency and duplicate
 - External command capability is limited to `codex` and `git`; arguments are allowed because later phases construct their CLI invocations.
 - The shell uses the system binaries through PATH, not bundled sidecars, as specified by the proposal.
 - Tauri's current plugin guidance requires Rust 1.77.2; the proposal's Rust 2024 edition requires Rust 1.85+, so the project declares `rust-version = "1.85"`.
-- Validate the generated Tauri capability schema after the first dependency install.
-- Before Phase IV, pin and empirically test Codex CLI `exec`/`resume` flags and event shapes.
 - Before release, test Windows process-tree cancellation and preserve the proposal's warning about uncommitted changes in the main project folder.
-- Git repo validation (checking that the project root is actually a git repository) is **not** enforced in Phase II — the folder picker accepts any directory. This will be enforced in Phase III when `WorktreeManager` is introduced.
+- Line anchors are snapshots of the diff at comment creation time; after a follow-up changes line positions, historical comments remain attached to their original turn and should not be silently re-anchored.
+- Before release, complete `docs/RELEASE_CHECKLIST.md` on packaged Windows, Linux, and macOS builds, including GUI PATH discovery and process-tree termination.

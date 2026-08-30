@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite --port 1420",
     "build": "tsc && vite build",
+    "test": "tsc -p tsconfig.tests.json && node .test-dist/tests/diff-fixtures.js",
     "preview": "vite preview --port 1420",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "bundle": "tauri build",
+    "bundle:windows": "tauri build --bundles msi,nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

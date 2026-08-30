@@ -44,6 +44,60 @@ export interface TaskEvent {
   error: string | null;
 }
 
+export interface CodexHealthStatus {
+  binaryFound: boolean;
+  version: string | null;
+  authEnvPresent: boolean;
+  authStatus: "authenticated" | "not_authenticated" | "unknown";
+  authDetail: string | null;
+  detail: string | null;
+}
+
+export interface BinaryHealthStatus {
+  binaryFound: boolean;
+  version: string | null;
+  detail: string | null;
+}
+
+export interface SystemHealthStatus {
+  codex: CodexHealthStatus;
+  git: BinaryHealthStatus;
+}
+
+export interface AppSettings {
+  codexBin: string;
+  gitBin: string;
+  maxConcurrentTasks: number;
+  mergeOnConfirm: boolean;
+  sandboxMode: "workspace-write";
+}
+
+export type UpdateSettingsInput = Pick<
+  AppSettings,
+  "codexBin" | "gitBin" | "maxConcurrentTasks" | "mergeOnConfirm"
+>;
+
+export type DiffSide = "old" | "new";
+
+export interface ReviewComment {
+  id: string;
+  taskId: string;
+  turnId: string;
+  filePath: string;
+  lineNumber: number | null;
+  side: DiffSide | null;
+  body: string;
+  resolved: boolean;
+  createdAt: string;
+}
+
+export interface AddReviewCommentInput {
+  filePath: string;
+  lineNumber: number | null;
+  side: DiffSide | null;
+  body: string;
+}
+
 // ---------------------------------------------------------------------------
 // Command input shapes
 // ---------------------------------------------------------------------------

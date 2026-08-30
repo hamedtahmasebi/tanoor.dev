@@ -1,10 +1,10 @@
-# Forge
+# Tanoor
 
-Forge is a Tauri desktop workspace for running Codex tasks in isolated git worktrees and reviewing the resulting changes.
+Tanoor is a Tauri desktop workspace for running Codex tasks in isolated git worktrees and reviewing the resulting changes.
 
 ## Status
 
-Phases I–IV are implemented pending the documented toolchain and CLI validation. The frontend is an editor-first desktop workflow: a compact project/task tree, inline task composer, `@` file references, `/` commands, and a command palette. Execution orchestration begins in Phase V. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the handoff and [project-proposal.md](project-proposal.md) for the full v1 design.
+All nine v1 phases are implemented. The frontend is an editor-first desktop workflow with isolated task execution, cumulative GitHub-style diff review, inline feedback, resumed Codex turns, commit/merge confirmation, and persisted operational settings. Windows MSI/NSIS packaging and the cross-platform release checklist are documented in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md). See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the handoff and [project-proposal.md](project-proposal.md) for the full v1 design.
 
 ## Prerequisites
 
@@ -21,3 +21,14 @@ npm run tauri dev
 ```
 
 The frontend can also be run by itself with `npm run dev`.
+
+## Packaging
+
+On Windows, build both configured installer formats with:
+
+```text
+npm run bundle:windows
+powershell -ExecutionPolicy Bypass -File scripts/verify-windows-bundle.ps1
+```
+
+The Windows installers are unsigned until a release owner configures the documented signing integration. Use `npm run bundle` for the native targets configured by Tauri on Linux or macOS.

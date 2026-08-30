@@ -113,6 +113,15 @@ pub struct RunHandle {
     /// PID of the spawned `codex` process.
     pub pid: u32,
     child: std::sync::Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    stderr: std::sync::Arc<std::sync::Mutex<String>>,
+    stderr_thread: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+/// Process details collected after Codex exits.
+#[derive(Debug, Clone, Default)]
+pub struct RunOutcome {
+    pub exit_code: Option<i32>,
+    pub stderr: String,
 }
 
 impl RunHandle {
@@ -132,15 +141,35 @@ impl RunHandle {
                 let _ = child.wait();
             }
         }
+        self.join_stderr_thread();
     }
 
     /// Reap the child process after it has finished naturally (no kill).
     ///
-    /// The background I/O thread calls this once stdout reaches EOF.
-    pub fn wait(&self) {
-        if let Ok(mut guard) = self.child.lock() {
+    /// The orchestration worker calls this once stdout reaches EOF.
+    pub fn wait(&self) -> RunOutcome {
+        let exit_code = if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {
-                let _ = child.wait();
+                child.wait().ok().and_then(|status| status.code())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        self.join_stderr_thread();
+        let stderr = self
+            .stderr
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_default();
+        RunOutcome { exit_code, stderr }
+    }
+
+    fn join_stderr_thread(&self) {
+        if let Ok(mut guard) = self.stderr_thread.lock() {
+            if let Some(thread) = guard.take() {
+                let _ = thread.join();
             }
         }
     }
@@ -193,12 +222,12 @@ pub trait AgentRunner: Send + Sync {
 ///
 /// **Initial turn:**
 /// ```text
-/// codex exec --json --sandbox workspace-write --full-auto "<prompt>"
+/// codex exec --json --sandbox workspace-write "<prompt>"
 /// ```
 ///
 /// **Resume turn (`resume_with_flags = true`, default):**
 /// ```text
-/// codex exec --json --sandbox workspace-write --full-auto resume <thread_id> "<prompt>"
+/// codex exec --json --sandbox workspace-write resume <thread_id> "<prompt>"
 /// ```
 ///
 /// **Resume turn (`resume_with_flags = false`):**
@@ -206,13 +235,13 @@ pub trait AgentRunner: Send + Sync {
 /// codex exec resume <thread_id> "<prompt>"
 /// ```
 /// Set `resume_with_flags = false` if the pinned CLI build rejects
-/// `--json`/`--sandbox`/`--full-auto` on `resume`.  See Phase IV handoff
+/// `--json`/`--sandbox` on `resume`.  See Phase IV handoff
 /// notes in `IMPLEMENTATION_STATUS.md`.
 #[derive(Debug, Clone)]
 pub struct CodexExecRunner {
     /// Path or name of the `codex` binary.  Defaults to `"codex"` (PATH lookup).
     pub codex_bin: String,
-    /// Whether to forward `--json --sandbox workspace-write --full-auto` on
+    /// Whether to forward `--json --sandbox workspace-write` on
     /// resume turns.  Default: `true`.  Set to `false` when the pinned CLI
     /// build rejects those flags on `resume`.
     pub resume_with_flags: bool,
@@ -236,6 +265,26 @@ impl CodexExecRunner {
     }
 }
 
+fn initial_args(prompt: &str) -> Vec<&str> {
+    vec!["exec", "--json", "--sandbox", "workspace-write", prompt]
+}
+
+fn resume_args<'a>(thread_id: &'a str, prompt: &'a str, with_flags: bool) -> Vec<&'a str> {
+    if with_flags {
+        vec![
+            "exec",
+            "--json",
+            "--sandbox",
+            "workspace-write",
+            "resume",
+            thread_id,
+            prompt,
+        ]
+    } else {
+        vec!["exec", "resume", thread_id, prompt]
+    }
+}
+
 impl AgentRunner for CodexExecRunner {
     fn start_turn(
         &self,
@@ -243,19 +292,7 @@ impl AgentRunner for CodexExecRunner {
         prompt: &str,
         log_path: &Path,
     ) -> Result<(RunHandle, EventStream), AppError> {
-        spawn_codex(
-            &self.codex_bin,
-            &[
-                "exec",
-                "--json",
-                "--sandbox",
-                "workspace-write",
-                "--full-auto",
-                prompt,
-            ],
-            cwd,
-            log_path,
-        )
+        spawn_codex(&self.codex_bin, &initial_args(prompt), cwd, log_path)
     }
 
     fn resume_turn(
@@ -265,31 +302,12 @@ impl AgentRunner for CodexExecRunner {
         prompt: &str,
         log_path: &Path,
     ) -> Result<(RunHandle, EventStream), AppError> {
-        if self.resume_with_flags {
-            spawn_codex(
-                &self.codex_bin,
-                &[
-                    "exec",
-                    "--json",
-                    "--sandbox",
-                    "workspace-write",
-                    "--full-auto",
-                    "resume",
-                    thread_id,
-                    prompt,
-                ],
-                cwd,
-                log_path,
-            )
-        } else {
-            // Fallback: omit flags that some CLI builds reject on resume.
-            spawn_codex(
-                &self.codex_bin,
-                &["exec", "resume", thread_id, prompt],
-                cwd,
-                log_path,
-            )
-        }
+        spawn_codex(
+            &self.codex_bin,
+            &resume_args(thread_id, prompt, self.resume_with_flags),
+            cwd,
+            log_path,
+        )
     }
 }
 
@@ -308,6 +326,10 @@ pub struct HealthStatus {
     pub version: Option<String>,
     /// `true` if `CODEX_API_KEY` or `OPENAI_API_KEY` is set in the environment.
     pub auth_env_present: bool,
+    /// `authenticated`, `not_authenticated`, or `unknown`.
+    pub auth_status: String,
+    /// Human-readable output from `codex login status`, when available.
+    pub auth_detail: Option<String>,
     /// Detail string (e.g. OS error) if the binary could not be launched.
     pub detail: Option<String>,
 }
@@ -336,10 +358,56 @@ pub fn health_check(codex_bin: &str) -> HealthStatus {
     let auth_env_present =
         std::env::var("CODEX_API_KEY").is_ok() || std::env::var("OPENAI_API_KEY").is_ok();
 
+    let (auth_status, auth_detail) = if binary_found {
+        match Command::new(codex_bin).args(["login", "status"]).output() {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                let message = if stdout.is_empty() { stderr } else { stdout };
+                (
+                    if out.status.success() {
+                        "authenticated"
+                    } else if auth_env_present {
+                        "unknown"
+                    } else {
+                        "not_authenticated"
+                    }
+                    .to_string(),
+                    if auth_env_present && !out.status.success() {
+                        Some(if message.is_empty() {
+                            "An API-key environment variable is present, but Codex did not confirm an active login".to_string()
+                        } else {
+                            format!(
+                                "API-key environment variable present; Codex reports: {message}"
+                            )
+                        })
+                    } else if message.is_empty() {
+                        None
+                    } else {
+                        Some(message)
+                    },
+                )
+            }
+            Err(error) => ("unknown".to_string(), Some(error.to_string())),
+        }
+    } else if auth_env_present {
+        (
+            "unknown".to_string(),
+            Some(
+                "An API-key environment variable is present, but the Codex binary is unavailable"
+                    .to_string(),
+            ),
+        )
+    } else {
+        ("unknown".to_string(), None)
+    };
+
     HealthStatus {
         binary_found,
         version,
         auth_env_present,
+        auth_status,
+        auth_detail,
         detail,
     }
 }
@@ -383,9 +451,24 @@ fn spawn_codex(
     let child = Arc::new(Mutex::new(Some(child)));
 
     let (tx, rx) = std::sync::mpsc::channel::<CodexEvent>();
-    spawn_io_threads(stdout, stderr, log_path.to_path_buf(), tx);
+    let stderr_output = Arc::new(Mutex::new(String::new()));
+    let stderr_thread = spawn_io_threads(
+        stdout,
+        stderr,
+        log_path.to_path_buf(),
+        stderr_output.clone(),
+        tx,
+    );
 
-    Ok((RunHandle { pid, child }, rx))
+    Ok((
+        RunHandle {
+            pid,
+            child,
+            stderr: stderr_output,
+            stderr_thread: Arc::new(Mutex::new(Some(stderr_thread))),
+        },
+        rx,
+    ))
 }
 
 /// Apply platform-specific flags to the child [`Command`].
@@ -437,14 +520,14 @@ fn kill_process_tree(pid: u32) {
 ///    [`EventStream`] on the receiver side.
 ///
 /// 2. **Stderr thread** — reads and persists stderr to `<stem>.stderr`
-///    alongside the JSONL log.  UI state is driven by stdout only; stderr
-///    exists for debugging.
+///    alongside the JSONL log, and captures it for actionable process errors.
 fn spawn_io_threads(
     stdout: impl std::io::Read + Send + 'static,
     stderr: impl std::io::Read + Send + 'static,
     log_path: std::path::PathBuf,
+    stderr_output: Arc<Mutex<String>>,
     tx: std::sync::mpsc::Sender<CodexEvent>,
-) {
+) -> std::thread::JoinHandle<()> {
     // Derive the stderr log path from the stdout log path.
     let stderr_path = {
         let stem = log_path
@@ -474,13 +557,21 @@ fn spawn_io_threads(
     // --- Stderr thread ---
     std::thread::spawn(move || {
         let mut log = std::fs::File::create(&stderr_path).ok();
+        let mut captured = String::new();
         for line in BufReader::new(stderr).lines() {
             let Ok(line) = line else { break };
             if let Some(ref mut f) = log {
                 let _ = writeln!(f, "{line}");
             }
+            if !captured.is_empty() {
+                captured.push('\n');
+            }
+            captured.push_str(&line);
         }
-    });
+        if let Ok(mut output) = stderr_output.lock() {
+            *output = captured;
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +688,7 @@ mod tests {
 
     #[test]
     fn health_check_missing_binary() {
-        let s = health_check("/nonexistent/codex_binary_forge_test");
+        let s = health_check("/nonexistent/codex_binary_tanoor_test");
         assert!(!s.binary_found);
         assert!(s.version.is_none());
         assert!(s.detail.is_some(), "detail must explain the launch failure");
@@ -612,6 +703,53 @@ mod tests {
         let r = CodexExecRunner::default();
         assert_eq!(r.codex_bin, "codex");
         assert!(r.resume_with_flags, "flags must be enabled by default");
+    }
+
+    #[test]
+    fn current_cli_arguments_do_not_use_full_auto() {
+        assert_eq!(
+            initial_args("prompt"),
+            ["exec", "--json", "--sandbox", "workspace-write", "prompt"]
+        );
+        assert_eq!(
+            resume_args("thread-id", "prompt", true),
+            [
+                "exec",
+                "--json",
+                "--sandbox",
+                "workspace-write",
+                "resume",
+                "thread-id",
+                "prompt",
+            ]
+        );
+    }
+
+    #[test]
+    fn process_failure_captures_stderr() {
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let log = tmp.path().join("turn.jsonl");
+        let current_exe = std::env::current_exe().unwrap();
+        let (handle, events) = spawn_codex(
+            current_exe.to_str().unwrap(),
+            &["--definitely-not-a-valid-libtest-argument"],
+            tmp.path(),
+            &log,
+        )
+        .unwrap();
+
+        assert_eq!(events.iter().count(), 0);
+        let outcome = handle.wait();
+        assert_ne!(outcome.exit_code, Some(0));
+        assert!(!outcome.stderr.is_empty());
+        assert_eq!(
+            outcome.stderr,
+            std::fs::read_to_string(log.with_extension("stderr"))
+                .unwrap()
+                .trim_end()
+        );
     }
 
     // -----------------------------------------------------------------------

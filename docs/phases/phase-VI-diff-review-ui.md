@@ -1,6 +1,6 @@
 # Phase VI — Diff review UI
 
-Status: **Pending**
+Status: **Implemented; validation passed**
 
 Maps to `project-proposal.md` Batch 5.
 

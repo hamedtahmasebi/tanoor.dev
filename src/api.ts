@@ -1,55 +1,208 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Project, Task, CreateTaskInput, UpdateTaskInput } from "./types";
+import type { InvokeArgs } from "@tauri-apps/api/core";
+import type {
+  CodexHealthStatus,
+  AppSettings,
+  SystemHealthStatus,
+  UpdateSettingsInput,
+  CreateTaskInput,
+  Project,
+  ReviewComment,
+  AddReviewCommentInput,
+  Task,
+  UpdateTaskInput,
+} from "./types";
 
 // ---------------------------------------------------------------------------
 // Typed wrappers around Tauri `invoke`.
 //
-// Tauri commands receive Rust parameter names. Return values use
-// camelCase because the Rust structs are annotated with
+// Tauri's command macro converts Rust parameter names to camelCase by default.
+// Return values also use camelCase because the Rust structs are annotated with
 // `#[serde(rename_all = "camelCase")]`.
 // ---------------------------------------------------------------------------
+
+type CommandContract = {
+  create_project: {
+    args: { rootPath: string };
+    result: Project;
+  };
+  list_projects: {
+    args: undefined;
+    result: Project[];
+  };
+  create_task: {
+    args: {
+      projectId: string;
+      title: string;
+      prompt: string;
+      fileRefs: string[];
+    };
+    result: Task;
+  };
+  list_tasks: {
+    args: { projectId: string };
+    result: Task[];
+  };
+  get_task: {
+    args: { taskId: string };
+    result: Task;
+  };
+  delete_task: {
+    args: { taskId: string };
+    result: void;
+  };
+  update_task_prompt: {
+    args: {
+      taskId: string;
+      title: string | null;
+      prompt: string | null;
+      fileRefs: string[] | null;
+    };
+    result: Task;
+  };
+  check_codex_health: {
+    args: undefined;
+    result: CodexHealthStatus;
+  };
+  get_settings: {
+    args: undefined;
+    result: AppSettings;
+  };
+  update_settings: {
+    args: UpdateSettingsInput;
+    result: AppSettings;
+  };
+  check_system_health: {
+    args: undefined;
+    result: SystemHealthStatus;
+  };
+  run_task: {
+    args: { taskId: string };
+    result: Task;
+  };
+  cancel_task: {
+    args: { taskId: string };
+    result: void;
+  };
+  add_review_comment: {
+    args: {
+      taskId: string;
+      filePath: string;
+      lineNumber: number | null;
+      side: "old" | "new" | null;
+      body: string;
+    };
+    result: ReviewComment;
+  };
+  resolve_review_comment: {
+    args: { commentId: string };
+    result: ReviewComment;
+  };
+  list_review_comments: {
+    args: { taskId: string };
+    result: ReviewComment[];
+  };
+  request_changes: {
+    args: {
+      taskId: string;
+      reviewerNote: string | null;
+    };
+    result: Task;
+  };
+  confirm_task: {
+    args: { taskId: string; merge: boolean };
+    result: Task;
+  };
+};
+
+const invokeCommand = <Name extends keyof CommandContract>(
+  name: Name,
+  args: CommandContract[Name]["args"],
+): Promise<CommandContract[Name]["result"]> =>
+  invoke(name, args as InvokeArgs | undefined);
 
 export const api = {
   // --- Projects ---
 
   createProject: (rootPath: string): Promise<Project> =>
-    invoke("create_project", { root_path: rootPath }),
+    invokeCommand("create_project", { rootPath }),
 
-  listProjects: (): Promise<Project[]> => invoke("list_projects"),
+  listProjects: (): Promise<Project[]> =>
+    invokeCommand("list_projects", undefined),
 
   // --- Tasks ---
 
   createTask: (projectId: string, input: CreateTaskInput): Promise<Task> =>
-    invoke("create_task", {
-      project_id: projectId,
+    invokeCommand("create_task", {
+      projectId,
       title: input.title,
       prompt: input.prompt,
-      file_refs: input.fileRefs,
+      fileRefs: input.fileRefs,
     }),
 
   listTasks: (projectId: string): Promise<Task[]> =>
-    invoke("list_tasks", { project_id: projectId }),
+    invokeCommand("list_tasks", { projectId }),
 
   getTask: (taskId: string): Promise<Task> =>
-    invoke("get_task", { task_id: taskId }),
+    invokeCommand("get_task", { taskId }),
 
   deleteTask: (taskId: string): Promise<void> =>
-    invoke("delete_task", { task_id: taskId }),
+    invokeCommand("delete_task", { taskId }),
 
   updateTaskPrompt: (taskId: string, input: UpdateTaskInput): Promise<Task> =>
-    invoke("update_task_prompt", {
-      task_id: taskId,
+    invokeCommand("update_task_prompt", {
+      taskId,
       title: input.title ?? null,
       prompt: input.prompt ?? null,
-      file_refs: input.fileRefs ?? null,
+      fileRefs: input.fileRefs ?? null,
     }),
 
-  runTask: (taskId: string, codexBin?: string): Promise<Task> =>
-    invoke("run_task", {
-      task_id: taskId,
-      codex_bin: codexBin ?? null,
-    }),
+  // --- Agent runner ---
+
+  checkCodexHealth: (): Promise<CodexHealthStatus> =>
+    invokeCommand("check_codex_health", undefined),
+
+  getSettings: (): Promise<AppSettings> =>
+    invokeCommand("get_settings", undefined),
+
+  updateSettings: (input: UpdateSettingsInput): Promise<AppSettings> =>
+    invokeCommand("update_settings", input),
+
+  checkSystemHealth: (): Promise<SystemHealthStatus> =>
+    invokeCommand("check_system_health", undefined),
+
+  runTask: (taskId: string): Promise<Task> =>
+    invokeCommand("run_task", { taskId }),
 
   cancelTask: (taskId: string): Promise<void> =>
-    invoke("cancel_task", { task_id: taskId }),
+    invokeCommand("cancel_task", { taskId }),
+
+  // --- Review ---
+
+  addReviewComment: (
+    taskId: string,
+    input: AddReviewCommentInput,
+  ): Promise<ReviewComment> =>
+    invokeCommand("add_review_comment", {
+      taskId,
+      filePath: input.filePath,
+      lineNumber: input.lineNumber,
+      side: input.side,
+      body: input.body,
+    }),
+
+  resolveReviewComment: (commentId: string): Promise<ReviewComment> =>
+    invokeCommand("resolve_review_comment", { commentId }),
+
+  listReviewComments: (taskId: string): Promise<ReviewComment[]> =>
+    invokeCommand("list_review_comments", { taskId }),
+
+  requestChanges: (taskId: string, reviewerNote?: string): Promise<Task> =>
+    invokeCommand("request_changes", {
+      taskId,
+      reviewerNote: reviewerNote?.trim() || null,
+    }),
+
+  confirmTask: (taskId: string, merge: boolean): Promise<Task> =>
+    invokeCommand("confirm_task", { taskId, merge }),
 };

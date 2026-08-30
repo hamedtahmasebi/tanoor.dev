@@ -4,6 +4,8 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./store";
 import { TaskCard } from "./components/TaskCard";
 import { NewTaskDialog } from "./components/NewTaskDialog";
+import { DiffReviewDialog } from "./components/DiffReview";
+import { SettingsDialog } from "./components/SettingsDialog";
 import type { CreateTaskInput, Task, TaskEvent } from "./types";
 
 type NavFilter = "all" | "needs_review" | "in_progress" | "approved";
@@ -42,7 +44,14 @@ function App() {
     cancelTask,
     appendTaskEvent,
     taskEvents,
+    reviewModal,
+    openReview,
+    closeReview,
     clearError,
+    systemHealth,
+    isSettingsOpen,
+    openSettings,
+    closeSettings,
   } = useStore();
 
   const [showProjectDropdown, setShowProjectDropdown] = useState(false);
@@ -63,17 +72,16 @@ function App() {
   }, [selectedTaskId, tasks]);
 
   useEffect(() => {
-    if (!selectedTaskId) return;
     let unlisten: (() => void) | undefined;
     let disposed = false;
-    void listen<TaskEvent>("task:" + selectedTaskId + ":event", (event) => {
+    void listen<TaskEvent>("forge:task-event", (event) => {
       appendTaskEvent(event.payload);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
     });
     return () => { disposed = true; unlisten?.(); };
-  }, [appendTaskEvent, selectedTaskId]);
+  }, [appendTaskEvent]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -89,11 +97,13 @@ function App() {
       if (event.key === "Escape") {
         setShowCommandPalette(false);
         setShowProjectDropdown(false);
+        closeReview();
+        closeSettings();
       }
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [closeReview, closeSettings]);
 
   const counts: Record<NavFilter, number> = {
     all: tasks.length,
@@ -131,14 +141,14 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className="activity-bar" aria-label="Forge navigation">
-        <div className="forge-mark" aria-label="Forge"><span>F</span></div>
+      <aside className="activity-bar" aria-label="Tanoor navigation">
+        <div className="tanoor-mark" aria-label="Tanoor"><span>T</span></div>
         <div className="activity-actions">
           <button className="activity-button active" type="button" title="Tasks" aria-label="Tasks">⌁</button>
-          <button className="activity-button" type="button" title="Changes" aria-label="Changes">⌘</button>
+          <button className="activity-button" type="button" title="Changes" aria-label="Changes" onClick={() => { const reviewTask = tasks.find((task) => ["awaiting_review", "changes_requested"].includes(task.status)); if (reviewTask) { setSelectedTaskId(reviewTask.id); void openReview(reviewTask.id); } }}>⌘</button>
           <button className="activity-button" type="button" title="Search" aria-label="Search" onClick={() => setShowCommandPalette(true)}>⌕</button>
         </div>
-        <button className="activity-button activity-settings" type="button" title="Settings" aria-label="Settings">⚙</button>
+        <button className={`activity-button activity-settings${isSettingsOpen ? " active" : ""}`} type="button" title="Settings" aria-label="Settings" onClick={() => { closeReview(); openSettings(); }}>⚙</button>
       </aside>
 
       <aside className="workspace-sidebar">
@@ -183,7 +193,7 @@ function App() {
         </div>
 
         <div className="workspace-sidebar-footer">
-          <div className="connection-row"><span className="connection-dot" /><span>Codex</span><span className="connection-state">offline</span></div>
+          <button className="connection-row" type="button" onClick={openSettings}><span className={`connection-dot${systemHealth?.codex.binaryFound ? " online" : ""}`} /><span>Codex</span><span className="connection-state">{systemHealth?.codex.authStatus === "authenticated" ? "ready" : systemHealth?.codex.binaryFound ? "auth needed" : "offline"}</span></button>
           <div className="shortcut-row"><span>Command palette</span><kbd>⌘ P</kbd></div>
         </div>
       </aside>
@@ -197,9 +207,9 @@ function App() {
         {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={clearError}>Dismiss</button></div>}
 
         {!currentProject ? (
-          <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Forge keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
+          <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Tanoor keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
         ) : selectedTask ? (
-          <section className="task-detail-pane"><div className="detail-breadcrumb"><span>{projectDisplayName(currentProject.rootPath)}</span><span>/</span><span>task</span></div><div className="detail-heading"><div><p className="detail-kicker">{statusLabel(selectedTask)}</p><h1>{selectedTask.title}</h1></div><span className={`detail-status detail-status--${selectedTask.status}`}>{statusLabel(selectedTask)}</span></div><div className="detail-divider" /><p className="detail-prompt">{selectedTask.prompt}</p>{selectedTask.fileRefs.length > 0 && <div className="detail-context"><span className="detail-label">Context</span>{selectedTask.fileRefs.map((ref) => <code key={ref}>@{ref}</code>)}</div>}<div className="detail-actions"><button className="quiet-button" type="button" disabled title="Execution will be enabled in Phase V">Run task <span>⌘ ↵</span></button><span className="detail-note">Execution and review are coming next.</span></div></section>
+          <section className="task-detail-pane"><div className="detail-breadcrumb"><span>{projectDisplayName(currentProject.rootPath)}</span><span>/</span><span>task</span></div><div className="detail-heading"><div><p className="detail-kicker">{statusLabel(selectedTask)}</p><h1>{selectedTask.title}</h1></div><span className={`detail-status detail-status--${selectedTask.status}`}>{statusLabel(selectedTask)}</span></div><div className="detail-divider" /><p className="detail-prompt">{selectedTask.prompt}</p>{selectedTask.fileRefs.length > 0 && <div className="detail-context"><span className="detail-label">Context</span>{selectedTask.fileRefs.map((ref) => <code key={ref}>@{ref}</code>)}</div>}{["awaiting_review", "changes_requested"].includes(selectedTask.status) && <div className="detail-review-card"><div><strong>Changes are ready for review</strong><span>Inspect the cumulative diff and leave line-level feedback.</span></div><button className="quiet-button" type="button" onClick={() => void openReview(selectedTask.id)}>Review changes</button></div>}</section>
         ) : (
           <NewTaskDialog project={currentProject} onClose={NOOP} onCreate={handleCreateTask} />
         )}
@@ -207,7 +217,11 @@ function App() {
         <footer className="status-bar"><span className="status-branch">⑂ main</span><span>workspace-write</span><span className="status-spacer" /><span>{currentProject ? projectDisplayName(currentProject.rootPath) : "No workspace"}</span><span>UTF-8</span></footer>
       </main>
 
-      {selectedTask && <aside className="execution-dock" aria-label="Task execution"><div className="execution-dock-heading"><span>Execution</span><span className={"execution-state execution-state--" + selectedTask.status}>{statusLabel(selectedTask)}</span></div><div className="execution-dock-actions">{selectedTask.status === "running" ? <button className="quiet-button" type="button" onClick={() => void handleCancelTask()}>Cancel run</button> : <button className="quiet-button" type="button" disabled={selectedTask.status !== "draft"} onClick={() => void handleRunTask()}>Run task</button>}</div>{selectedTaskEvents.length > 0 && <div className="run-output" aria-label="Run output">{selectedTaskEvents.slice(-8).map((event, index) => <div className="run-output-line" key={event.turnId + "-" + index}><span>{event.eventType}</span>{event.error && <small>{event.error}</small>}</div>)}</div>}</aside>}
+      {selectedTask && <aside className="execution-dock" aria-label="Task execution"><div className="execution-dock-heading"><span>Execution</span><span className={"execution-state execution-state--" + selectedTask.status}>{statusLabel(selectedTask)}</span></div><div className="execution-dock-actions">{selectedTask.status === "running" ? <button className="quiet-button" type="button" onClick={() => void handleCancelTask()}>Cancel run</button> : ["awaiting_review", "changes_requested"].includes(selectedTask.status) ? <button className="quiet-button" type="button" onClick={() => void openReview(selectedTask.id)}>Review changes</button> : <button className="quiet-button" type="button" disabled={selectedTask.status !== "draft"} onClick={() => void handleRunTask()}>Run task</button>}</div>{selectedTaskEvents.length > 0 && <div className="run-output" aria-label="Run output">{selectedTaskEvents.slice(-8).map((event, index) => <div className="run-output-line" key={event.turnId + "-" + index}><span>{event.eventType}</span>{event.error && <small>{event.error}</small>}</div>)}</div>}</aside>}
+
+      {reviewModal && (() => { const task = tasks.find((item) => item.id === reviewModal.taskId); return task ? <DiffReviewDialog task={task} /> : null; })()}
+
+      {isSettingsOpen && <SettingsDialog />}
 
       {showCommandPalette && <div className="command-overlay" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setShowCommandPalette(false); }}><div className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-input-row"><span>⌕</span><input autoFocus placeholder="Search commands…" onKeyDown={(event) => { if (event.key === "Escape") setShowCommandPalette(false); }} /></div><div className="command-group-label">Suggestions</div><button type="button" className="command-item" onClick={() => { setSelectedTaskId(null); setShowCommandPalette(false); }}><span className="command-item-icon">＋</span><span>New task</span><kbd>⌘ N</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">⌁</span><span>Compact conversation</span><kbd>/ compact</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">◈</span><span>Change model</span><kbd>/ model</kbd></button><button type="button" className="command-item" onClick={handleAddProject}><span className="command-item-icon">⌂</span><span>Open project</span><kbd>⌘ O</kbd></button></div></div>}
     </div>

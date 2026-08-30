@@ -131,14 +131,14 @@ CREATE TABLE settings (
 ## 4. Codex integration details
 
 - **Initial turn**:
-  `codex exec --json --sandbox workspace-write --full-auto "<prompt>"`, with the process's working directory set to the task's worktree (via the shell plugin's process-spawn cwd option; fall back to Codex's own `--cd <path>` flag if the spawn API doesn't expose cwd directly).
+  `codex exec --json --sandbox workspace-write "<prompt>"`, with the process's working directory set to the task's worktree (via the shell plugin's process-spawn cwd option; fall back to Codex's own `--cd <path>` flag if the spawn API doesn't expose cwd directly).
 - **`--json`** turns stdout into a JSONL event stream: `thread.started` (carries `thread_id`), `turn.started`, `item.started|updated|completed` (item types: `agent_message`, `reasoning`, `command_execution`, `file_change`, `mcp_tool_call`, `web_search`, plan/`todo_list` updates), `turn.completed` (includes token usage) or `turn.failed`, and `error` (transient `"Reconnecting..."` errors are non-fatal, treat as progress). Human-readable progress also streams on **stderr** — persist it for debugging, but drive all UI state off the parsed **stdout** JSONL only.
 - **Follow-up turns**: `codex exec resume <thread_id> "<followup prompt>"` (or `resume --last`).
-  ⚠️ **Verify against the pinned Codex CLI version before relying on this**: some CLI builds reject `--json`/`--sandbox`/`--full-auto`/`--model` on `resume`, honoring only the flags set on the first turn of the thread. If `--json` is rejected on resume, fall back to treating resume's plain stdout as the final agent message (no structured events) until the CLI version supports otherwise. Pin an exact Codex CLI version rather than assuming flag support.
-- **Sandbox/approval**: `--sandbox workspace-write --full-auto` keeps writes confined to the worktree and avoids any interactive approval prompt blocking the process (there's no TTY to answer one from a spawned background process). Never use `danger-full-access` in v1. Confirm during Batch 3 that `--sandbox` and `--full-auto` are meant to be combined explicitly rather than redundant — treat as a smoke-test item, not an assumption to build deeper logic on.
+  ⚠️ **Verify against the pinned Codex CLI version before relying on this**: some CLI builds reject `--json`/`--sandbox`/`--model` on `resume`, honoring only the flags set on the first turn of the thread. If `--json` is rejected on resume, fall back to treating resume's plain stdout as the final agent message (no structured events) until the CLI version supports otherwise. Pin an exact Codex CLI version rather than assuming flag support.
+- **Sandbox/approval**: `--sandbox workspace-write` keeps writes confined to the worktree. Never use `danger-full-access` in v1. The obsolete `--full-auto` flag is not passed because current Codex CLI builds reject it.
 - **Auth**: Codex must already be authenticated on the machine (`codex login`, or a `CODEX_API_KEY`/`OPENAI_API_KEY` env var). The app doesn't manage credentials — Settings should show whether `codex` is resolvable on PATH and authenticated, via a one-off health check (e.g. `codex exec --json "ok"` against a scratch temp dir) and link out to Codex's own login docs if it fails.
 - **Cancellation**: kill the process tree mid-turn (see §7), mark the turn `cancelled`; leave whatever partial diff exists in the worktree so the user can still inspect or discard it.
-- **Noted alternative for later**: `codex mcp-server` runs Codex as a standard MCP stdio server (JSON-RPC 2.0), exposing `codex`/`codex-reply` tools with native thread continuation and structured approval-request notifications. Worth adopting in a v2 if per-action approval UX (rather than blanket `--full-auto`) becomes a requirement. Not used in v1, to keep the process model simple.
+- **Noted alternative for later**: `codex mcp-server` runs Codex as a standard MCP stdio server (JSON-RPC 2.0), exposing `codex`/`codex-reply` tools with native thread continuation and structured approval-request notifications. Worth adopting in a v2 if per-action approval UX becomes a requirement. Not used in v1, to keep the process model simple.
 
 ---
 
@@ -183,6 +183,6 @@ Codex/git binary path overrides + detected versions + health/auth status. Max co
 - Non-git projects.
 
 ## 7. Risks to verify empirically while building
-- Whether `resume` accepts `--json`/`--sandbox`/`--full-auto` on the specific pinned Codex CLI version (§4).
+- Whether `resume` accepts `--json`/`--sandbox` on the specific pinned Codex CLI version (§4).
 - Windows process-tree termination for a spawned `codex` and any of its own subprocesses — a plain child-kill may not reach grandchildren; test explicitly (`taskkill /T /F /PID` vs Unix process-group kill).
 - Behavior when the project has uncommitted changes at task-creation time: v1 branches the worktree off HEAD regardless and does not carry over uncommitted changes from the main working copy — call this out to the user in the "new task" UI.

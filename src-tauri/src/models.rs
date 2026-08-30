@@ -32,3 +32,44 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
 }
+
+/// A review note anchored to the cumulative diff for a task turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewComment {
+    pub id: String,
+    pub task_id: String,
+    pub turn_id: String,
+    pub file_path: String,
+    /// One-based line number on `side`; `None` denotes a file-level comment.
+    pub line_number: Option<i64>,
+    /// `old` or `new` for line comments; `None` for file-level comments.
+    pub side: Option<String>,
+    pub body: String,
+    pub resolved: bool,
+    pub created_at: String,
+}
+
+/// Persisted operational settings. The sandbox is deliberately read-only in
+/// the UI and is not stored: v1 always runs Codex with `workspace-write`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettings {
+    pub codex_bin: String,
+    pub git_bin: String,
+    pub max_concurrent_tasks: usize,
+    pub merge_on_confirm: bool,
+    pub sandbox_mode: String,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            codex_bin: "codex".to_string(),
+            git_bin: "git".to_string(),
+            max_concurrent_tasks: 2,
+            merge_on_confirm: false,
+            sandbox_mode: "workspace-write".to_string(),
+        }
+    }
+}

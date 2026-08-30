@@ -1,6 +1,24 @@
 import { create } from "zustand";
 import { api } from "./api";
-import type { Project, Task, CreateTaskInput, UpdateTaskInput, TaskEvent } from "./types";
+import type {
+  AddReviewCommentInput,
+  AppSettings,
+  CreateTaskInput,
+  Project,
+  ReviewComment,
+  Task,
+  TaskEvent,
+  SystemHealthStatus,
+  UpdateSettingsInput,
+  UpdateTaskInput,
+} from "./types";
+
+export type ReviewStep = "review" | "confirm" | "request_changes";
+
+export interface ReviewModalState {
+  taskId: string;
+  step: ReviewStep;
+}
 
 // ---------------------------------------------------------------------------
 // Store shape
@@ -12,10 +30,20 @@ interface AppState {
   currentProjectId: string | null;
   tasks: Task[];
   taskEvents: Record<string, TaskEvent[]>;
+  reviewComments: Record<string, ReviewComment[]>;
+  reviewModal: ReviewModalState | null;
+  settings: AppSettings | null;
+  systemHealth: SystemHealthStatus | null;
+  isSettingsOpen: boolean;
 
   // --- Loading flags ---
   isLoadingProjects: boolean;
   isLoadingTasks: boolean;
+  isLoadingReview: boolean;
+  isSubmittingReview: boolean;
+  isLoadingSettings: boolean;
+  isSavingSettings: boolean;
+  isCheckingHealth: boolean;
 
   // --- Error ---
   error: string | null;
@@ -30,6 +58,18 @@ interface AppState {
   runTask: (taskId: string) => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   appendTaskEvent: (event: TaskEvent) => void;
+  openReview: (taskId: string) => Promise<void>;
+  setReviewStep: (step: ReviewStep) => void;
+  closeReview: () => void;
+  loadReviewComments: (taskId: string) => Promise<void>;
+  addReviewComment: (taskId: string, input: AddReviewCommentInput) => Promise<void>;
+  resolveReviewComment: (taskId: string, commentId: string) => Promise<void>;
+  requestChanges: (taskId: string, reviewerNote: string) => Promise<void>;
+  confirmTask: (taskId: string, merge: boolean) => Promise<void>;
+  openSettings: () => void;
+  closeSettings: () => void;
+  saveSettings: (input: UpdateSettingsInput) => Promise<void>;
+  refreshSystemHealth: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -42,21 +82,35 @@ export const useStore = create<AppState>((set, get) => ({
   currentProjectId: null,
   tasks: [],
   taskEvents: {},
+  reviewComments: {},
+  reviewModal: null,
+  settings: null,
+  systemHealth: null,
+  isSettingsOpen: false,
   isLoadingProjects: false,
   isLoadingTasks: false,
+  isLoadingReview: false,
+  isSubmittingReview: false,
+  isLoadingSettings: false,
+  isSavingSettings: false,
+  isCheckingHealth: false,
   error: null,
 
   initApp: async () => {
-    set({ isLoadingProjects: true, error: null });
+    set({ isLoadingProjects: true, isLoadingSettings: true, error: null });
     try {
-      const projects = await api.listProjects();
+      const [projects, settings] = await Promise.all([
+        api.listProjects(),
+        api.getSettings(),
+      ]);
       const currentProjectId = projects.length > 0 ? projects[0].id : null;
-      set({ projects, currentProjectId, isLoadingProjects: false });
+      set({ projects, settings, currentProjectId, isLoadingProjects: false, isLoadingSettings: false });
+      void get().refreshSystemHealth();
       if (currentProjectId) {
         await get().switchProject(currentProjectId);
       }
     } catch (e) {
-      set({ error: String(e), isLoadingProjects: false });
+      set({ error: String(e), isLoadingProjects: false, isLoadingSettings: false });
     }
   },
 
@@ -155,6 +209,136 @@ export const useStore = create<AppState>((set, get) => ({
         : s.tasks;
       return { taskEvents: { ...s.taskEvents, [event.taskId]: next }, tasks };
     });
+  },
+
+  openReview: async (taskId: string) => {
+    set({ reviewModal: { taskId, step: "review" } });
+    try {
+      await get().loadReviewComments(taskId);
+    } catch {
+      // The loader already exposes the error in store state. Keeping the
+      // dialog open lets the user dismiss it or retry without an unhandled
+      // promise from click handlers.
+    }
+  },
+
+  setReviewStep: (step: ReviewStep) => {
+    set((state) => state.reviewModal
+      ? { reviewModal: { ...state.reviewModal, step } }
+      : state);
+  },
+
+  closeReview: () => set({ reviewModal: null }),
+
+  loadReviewComments: async (taskId: string) => {
+    set({ isLoadingReview: true, error: null });
+    try {
+      const comments = await api.listReviewComments(taskId);
+      set((state) => ({
+        reviewComments: { ...state.reviewComments, [taskId]: comments },
+        isLoadingReview: false,
+      }));
+    } catch (e) {
+      set({ error: String(e), isLoadingReview: false });
+      throw e;
+    }
+  },
+
+  addReviewComment: async (taskId: string, input: AddReviewCommentInput) => {
+    set({ error: null });
+    try {
+      const comment = await api.addReviewComment(taskId, input);
+      set((state) => ({
+        reviewComments: {
+          ...state.reviewComments,
+          [taskId]: [...(state.reviewComments[taskId] ?? []), comment],
+        },
+      }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  resolveReviewComment: async (taskId: string, commentId: string) => {
+    set({ error: null });
+    try {
+      const updated = await api.resolveReviewComment(commentId);
+      set((state) => ({
+        reviewComments: {
+          ...state.reviewComments,
+          [taskId]: (state.reviewComments[taskId] ?? []).map((comment) =>
+            comment.id === updated.id ? updated : comment),
+        },
+      }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  requestChanges: async (taskId: string, reviewerNote: string) => {
+    set({ isSubmittingReview: true, error: null });
+    try {
+      const task = await api.requestChanges(taskId, reviewerNote);
+      set((state) => ({
+        tasks: state.tasks.map((item) => item.id === task.id ? task : item),
+        reviewComments: {
+          ...state.reviewComments,
+          [taskId]: (state.reviewComments[taskId] ?? []).map((comment) =>
+            comment.resolved ? comment : { ...comment, resolved: true }),
+        },
+        reviewModal: null,
+        isSubmittingReview: false,
+      }));
+    } catch (e) {
+      set({ error: String(e), isSubmittingReview: false });
+      throw e;
+    }
+  },
+
+  confirmTask: async (taskId: string, merge: boolean) => {
+    set({ isSubmittingReview: true, error: null });
+    try {
+      const task = await api.confirmTask(taskId, merge);
+      set((state) => ({
+        tasks: state.tasks.map((item) => item.id === task.id ? task : item),
+        reviewModal: null,
+        isSubmittingReview: false,
+      }));
+    } catch (e) {
+      set({ error: String(e), isSubmittingReview: false });
+      throw e;
+    }
+  },
+
+  openSettings: () => {
+    set({ isSettingsOpen: true, error: null });
+    void get().refreshSystemHealth();
+  },
+
+  closeSettings: () => set({ isSettingsOpen: false }),
+
+  saveSettings: async (input: UpdateSettingsInput) => {
+    set({ isSavingSettings: true, error: null });
+    try {
+      const settings = await api.updateSettings(input);
+      set({ settings, isSavingSettings: false });
+      await get().refreshSystemHealth();
+    } catch (e) {
+      set({ error: String(e), isSavingSettings: false });
+      throw e;
+    }
+  },
+
+  refreshSystemHealth: async () => {
+    set({ isCheckingHealth: true });
+    try {
+      const systemHealth = await api.checkSystemHealth();
+      set({ systemHealth, isCheckingHealth: false });
+    } catch (e) {
+      set({ error: String(e), isCheckingHealth: false });
+    }
   },
 
   clearError: () => set({ error: null }),
