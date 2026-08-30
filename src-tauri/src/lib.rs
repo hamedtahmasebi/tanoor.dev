@@ -8,6 +8,7 @@ mod models;
 pub mod runner;
 pub mod worktree;
 
+use chrono::Utc;
 use commands::DbState;
 use execution::RunState;
 use std::sync::Mutex;
@@ -29,6 +30,15 @@ pub fn run() {
             let db_path = app_data_dir.join("forge.db");
             let conn = db::open(&db_path).expect("Failed to open database");
             let settings = db::select_settings(&conn).expect("Failed to load settings");
+            // Recover any tasks that were left in `running` state by a
+            // previous crash or forced-quit. The in-memory RunState is always
+            // empty at this point, so those tasks have no live process.
+            let now = Utc::now().to_rfc3339();
+            let recovered = db::mark_dangling_tasks_failed(&conn, &now)
+                .expect("Failed to recover dangling tasks");
+            if recovered > 0 {
+                eprintln!("[forge] Recovered {recovered} dangling task(s) → failed");
+            }
             app.manage(RunState::new(settings.max_concurrent_tasks));
             app.manage(DbState(Mutex::new(conn)));
             Ok(())
@@ -52,6 +62,8 @@ pub fn run() {
             commands::list_review_comments,
             commands::request_changes,
             commands::confirm_task,
+            commands::list_task_turns,
+            commands::get_turn_output,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Workflow Automation");

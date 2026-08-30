@@ -8,6 +8,7 @@ import type {
   ReviewComment,
   Task,
   TaskEvent,
+  TaskTurn,
   SystemHealthStatus,
   UpdateSettingsInput,
   UpdateTaskInput,
@@ -30,6 +31,8 @@ interface AppState {
   currentProjectId: string | null;
   tasks: Task[];
   taskEvents: Record<string, TaskEvent[]>;
+  taskTurns: Record<string, TaskTurn[]>;
+  taskOutput: Record<string, string[]>; // turnId -> log lines
   reviewComments: Record<string, ReviewComment[]>;
   reviewModal: ReviewModalState | null;
   settings: AppSettings | null;
@@ -44,6 +47,7 @@ interface AppState {
   isLoadingSettings: boolean;
   isSavingSettings: boolean;
   isCheckingHealth: boolean;
+  isLoadingTaskOutput: boolean;
 
   // --- Error ---
   error: string | null;
@@ -58,6 +62,7 @@ interface AppState {
   runTask: (taskId: string) => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   appendTaskEvent: (event: TaskEvent) => void;
+  loadTaskOutput: (taskId: string) => Promise<void>;
   openReview: (taskId: string) => Promise<void>;
   setReviewStep: (step: ReviewStep) => void;
   closeReview: () => void;
@@ -82,6 +87,8 @@ export const useStore = create<AppState>((set, get) => ({
   currentProjectId: null,
   tasks: [],
   taskEvents: {},
+  taskTurns: {},
+  taskOutput: {},
   reviewComments: {},
   reviewModal: null,
   settings: null,
@@ -94,6 +101,7 @@ export const useStore = create<AppState>((set, get) => ({
   isLoadingSettings: false,
   isSavingSettings: false,
   isCheckingHealth: false,
+  isLoadingTaskOutput: false,
   error: null,
 
   initApp: async () => {
@@ -189,7 +197,11 @@ export const useStore = create<AppState>((set, get) => ({
   cancelTask: async (taskId: string) => {
     set({ error: null });
     try {
-      await api.cancelTask(taskId);
+      const task = await api.cancelTask(taskId);
+      // Update the task in state immediately. For a live cancel the background
+      // thread will emit a final status event that overwrites this; for a
+      // dangling task this is the only update that will arrive.
+      set((s) => ({ tasks: s.tasks.map((t) => (t.id === task.id ? task : t)) }));
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -199,7 +211,7 @@ export const useStore = create<AppState>((set, get) => ({
   appendTaskEvent: (event: TaskEvent) => {
     set((s) => {
       const previous = s.taskEvents[event.taskId] ?? [];
-      const next = [...previous, event].slice(-200);
+      const next = [...previous, event].slice(-500);
       const tasks = event.status
         ? s.tasks.map((task) => task.id === event.taskId ? {
           ...task,
@@ -209,6 +221,31 @@ export const useStore = create<AppState>((set, get) => ({
         : s.tasks;
       return { taskEvents: { ...s.taskEvents, [event.taskId]: next }, tasks };
     });
+  },
+
+  loadTaskOutput: async (taskId: string) => {
+    set({ isLoadingTaskOutput: true });
+    try {
+      const turns = await api.listTaskTurns(taskId);
+      // Fetch log lines for each turn in parallel
+      const outputEntries = await Promise.all(
+        turns.map(async (turn) => {
+          const lines = await api.getTurnOutput(turn.logPath);
+          return { turnId: turn.id, lines };
+        }),
+      );
+      const taskOutput: Record<string, string[]> = {};
+      for (const { turnId, lines } of outputEntries) {
+        taskOutput[turnId] = lines;
+      }
+      set((s) => ({
+        taskTurns: { ...s.taskTurns, [taskId]: turns },
+        taskOutput: { ...s.taskOutput, ...taskOutput },
+        isLoadingTaskOutput: false,
+      }));
+    } catch (e) {
+      set({ error: String(e), isLoadingTaskOutput: false });
+    }
   },
 
   openReview: async (taskId: string) => {

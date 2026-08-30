@@ -6,6 +6,30 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Startup recovery
+// ---------------------------------------------------------------------------
+
+/// On every startup the in-memory `RunState` is empty, so any task that is
+/// still marked `running` in the database was orphaned by a previous crash or
+/// forced-quit. Mark every such task `failed` and close any of their open turn
+/// rows so the UI can present a consistent, actionable state.
+pub fn mark_dangling_tasks_failed(conn: &Connection, now: &str) -> Result<usize, AppError> {
+    // Close open turn rows first (FK-ordered).
+    conn.execute(
+        "UPDATE turn SET status = 'failed', ended_at = ?1
+         WHERE status = 'running'",
+        params![now],
+    )?;
+    // Mark the tasks themselves failed.
+    let changed = conn.execute(
+        "UPDATE task SET status = 'failed', updated_at = ?1
+         WHERE status = 'running'",
+        params![now],
+    )?;
+    Ok(changed)
+}
+
+// ---------------------------------------------------------------------------
 // Schema
 // ---------------------------------------------------------------------------
 
@@ -570,6 +594,31 @@ pub fn select_task(conn: &Connection, id: &str) -> Result<Option<Task>, AppError
     conn.query_row(&sql, params![id], row_to_task)
         .optional()
         .map_err(AppError::from)
+}
+
+pub fn select_turns_for_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<crate::models::TaskTurn>, AppError> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, kind, prompt, status, log_path, started_at, ended_at
+         FROM turn WHERE task_id = ?1 ORDER BY started_at ASC, rowid ASC",
+    )?;
+    let turns = stmt
+        .query_map(params![task_id], |row| {
+            Ok(crate::models::TaskTurn {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                kind: row.get(2)?,
+                prompt: row.get(3)?,
+                status: row.get(4)?,
+                log_path: row.get(5)?,
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(turns)
 }
 
 pub fn delete_task_by_id(conn: &Connection, id: &str) -> Result<bool, AppError> {

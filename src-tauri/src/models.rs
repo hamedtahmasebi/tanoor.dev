@@ -62,6 +62,20 @@ pub struct AppSettings {
     pub sandbox_mode: String,
 }
 
+/// A single agent turn associated with a task.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskTurn {
+    pub id: String,
+    pub task_id: String,
+    pub kind: String,
+    pub prompt: String,
+    pub status: String,
+    pub log_path: String,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {

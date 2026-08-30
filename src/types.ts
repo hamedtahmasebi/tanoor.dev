@@ -34,6 +34,17 @@ export interface Task {
   updatedAt: string;
 }
 
+export interface TaskTurn {
+  id: string;
+  taskId: string;
+  kind: string;
+  prompt: string;
+  status: string;
+  logPath: string;
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export interface TaskEvent {
   taskId: string;
   turnId: string;

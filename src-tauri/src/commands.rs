@@ -8,7 +8,7 @@ use crate::{
     db,
     error::AppError,
     execution::{self, RunState},
-    models::{AppSettings, Project, ReviewComment, Task},
+    models::{AppSettings, Project, ReviewComment, Task, TaskTurn},
     runner,
     worktree::WorktreeManager,
 };
@@ -359,9 +359,55 @@ pub fn run_task(
 
 /// Cancel the active Codex process tree. The background consumer computes and
 /// persists the partial diff before publishing the cancelled state.
+///
+/// If there is no live run for the task but it is still marked `running` in
+/// the database (dangling after a crash), the task is transitioned to `failed`
+/// so the UI can recover gracefully.
 #[tauri::command]
-pub fn cancel_task(runs: tauri::State<'_, RunState>, task_id: String) -> Result<(), AppError> {
-    execution::cancel_task(&runs, &task_id)
+pub fn cancel_task(
+    state: State<'_, DbState>,
+    runs: tauri::State<'_, RunState>,
+    task_id: String,
+) -> Result<Task, AppError> {
+    match execution::cancel_task(&runs, &task_id) {
+        Ok(()) => {
+            // Live process signalled — return the current task row so the
+            // frontend can update its status immediately (the background thread
+            // will emit a final status event shortly after).
+            let conn = state
+                .0
+                .lock()
+                .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+            db::select_task(&conn, &task_id)?
+                .ok_or_else(|| AppError::NotFound(format!("Task '{task_id}' not found")))
+        }
+        Err(AppError::NotFound(_)) => {
+            // No live run — check if the task is stuck in `running` in the DB
+            // (dangling after a crash or hard-kill) and recover it.
+            let conn = state
+                .0
+                .lock()
+                .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+            let task = db::select_task(&conn, &task_id)?
+                .ok_or_else(|| AppError::NotFound(format!("Task '{task_id}' not found")))?;
+            if task.status == "running" {
+                let now_str = now();
+                // Close any open turn rows for this task.
+                conn.execute(
+                    "UPDATE turn SET status = 'failed', ended_at = ?1
+                     WHERE task_id = ?2 AND status = 'running'",
+                    rusqlite::params![&now_str, &task_id],
+                )?;
+                db::finish_task(&conn, &task_id, "failed", "", &now_str)?;
+                db::select_task(&conn, &task_id)?
+                    .ok_or_else(|| AppError::NotFound(format!("Task '{task_id}' not found")))
+            } else {
+                // Task is not running — nothing to cancel, return it as-is.
+                Ok(task)
+            }
+        }
+        Err(other) => Err(other),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +538,36 @@ pub fn confirm_task(
     merge: bool,
 ) -> Result<Task, AppError> {
     execution::confirm_task(&app, &runs, &task_id, merge)
+}
+
+/// Return all turns for a task in chronological order.
+#[tauri::command]
+pub fn list_task_turns(
+    state: State<'_, DbState>,
+    task_id: String,
+) -> Result<Vec<TaskTurn>, AppError> {
+    let conn = state
+        .0
+        .lock()
+        .map_err(|_| AppError::InvalidOperation("Database is unavailable".to_string()))?;
+    db::select_turns_for_task(&conn, &task_id)
+}
+
+/// Read the JSONL event log for a specific turn and return raw lines.
+/// Returns an empty list if the log file does not yet exist.
+#[tauri::command]
+pub fn get_turn_output(turn_log_path: String) -> Result<Vec<String>, AppError> {
+    let path = std::path::Path::new(&turn_log_path);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| AppError::InvalidOperation(format!("Cannot read log: {e}")))?
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.to_string())
+        .collect();
+    Ok(content)
 }
 
 // ---------------------------------------------------------------------------

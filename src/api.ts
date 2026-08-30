@@ -10,6 +10,7 @@ import type {
   ReviewComment,
   AddReviewCommentInput,
   Task,
+  TaskTurn,
   UpdateTaskInput,
 } from "./types";
 
@@ -82,7 +83,7 @@ type CommandContract = {
   };
   cancel_task: {
     args: { taskId: string };
-    result: void;
+    result: Task;
   };
   add_review_comment: {
     args: {
@@ -112,6 +113,14 @@ type CommandContract = {
   confirm_task: {
     args: { taskId: string; merge: boolean };
     result: Task;
+  };
+  list_task_turns: {
+    args: { taskId: string };
+    result: TaskTurn[];
+  };
+  get_turn_output: {
+    args: { turnLogPath: string };
+    result: string[];
   };
 };
 
@@ -174,7 +183,7 @@ export const api = {
   runTask: (taskId: string): Promise<Task> =>
     invokeCommand("run_task", { taskId }),
 
-  cancelTask: (taskId: string): Promise<void> =>
+  cancelTask: (taskId: string): Promise<Task> =>
     invokeCommand("cancel_task", { taskId }),
 
   // --- Review ---
@@ -205,4 +214,10 @@ export const api = {
 
   confirmTask: (taskId: string, merge: boolean): Promise<Task> =>
     invokeCommand("confirm_task", { taskId, merge }),
+
+  listTaskTurns: (taskId: string): Promise<TaskTurn[]> =>
+    invokeCommand("list_task_turns", { taskId }),
+
+  getTurnOutput: (turnLogPath: string): Promise<string[]> =>
+    invokeCommand("get_turn_output", { turnLogPath }),
 };

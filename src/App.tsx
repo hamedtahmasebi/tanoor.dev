@@ -6,7 +6,8 @@ import { TaskCard } from "./components/TaskCard";
 import { NewTaskDialog } from "./components/NewTaskDialog";
 import { DiffReviewDialog } from "./components/DiffReview";
 import { SettingsDialog } from "./components/SettingsDialog";
-import type { CreateTaskInput, Task, TaskEvent } from "./types";
+import { TaskFollowUpPanel } from "./components/TaskFollowUpPanel";
+import type { CreateTaskInput, TaskEvent } from "./types";
 
 type NavFilter = "all" | "needs_review" | "in_progress" | "approved";
 
@@ -24,9 +25,6 @@ function projectDisplayName(rootPath: string): string {
   return parts[parts.length - 1] ?? rootPath;
 }
 
-function statusLabel(task: Task): string {
-  return task.status.replace("_", " ");
-}
 
 function App() {
   const {
@@ -61,7 +59,6 @@ function App() {
 
   const currentProject = projects.find((project) => project.id === currentProjectId) ?? null;
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
-  const selectedTaskEvents = selectedTask ? (taskEvents[selectedTask.id] ?? []) : [];
 
   useEffect(() => {
     void useStore.getState().initApp();
@@ -209,7 +206,14 @@ function App() {
         {!currentProject ? (
           <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Tanoor keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
         ) : selectedTask ? (
-          <section className="task-detail-pane"><div className="detail-breadcrumb"><span>{projectDisplayName(currentProject.rootPath)}</span><span>/</span><span>task</span></div><div className="detail-heading"><div><p className="detail-kicker">{statusLabel(selectedTask)}</p><h1>{selectedTask.title}</h1></div><span className={`detail-status detail-status--${selectedTask.status}`}>{statusLabel(selectedTask)}</span></div><div className="detail-divider" /><p className="detail-prompt">{selectedTask.prompt}</p>{selectedTask.fileRefs.length > 0 && <div className="detail-context"><span className="detail-label">Context</span>{selectedTask.fileRefs.map((ref) => <code key={ref}>@{ref}</code>)}</div>}{["awaiting_review", "changes_requested"].includes(selectedTask.status) && <div className="detail-review-card"><div><strong>Changes are ready for review</strong><span>Inspect the cumulative diff and leave line-level feedback.</span></div><button className="quiet-button" type="button" onClick={() => void openReview(selectedTask.id)}>Review changes</button></div>}</section>
+          <section className="task-detail-pane">
+            <TaskFollowUpPanel
+              task={selectedTask}
+              onRunTask={() => void handleRunTask()}
+              onCancelTask={() => void handleCancelTask()}
+              onOpenReview={() => void openReview(selectedTask.id)}
+            />
+          </section>
         ) : (
           <NewTaskDialog project={currentProject} onClose={NOOP} onCreate={handleCreateTask} />
         )}
@@ -217,7 +221,30 @@ function App() {
         <footer className="status-bar"><span className="status-branch">⑂ main</span><span>workspace-write</span><span className="status-spacer" /><span>{currentProject ? projectDisplayName(currentProject.rootPath) : "No workspace"}</span><span>UTF-8</span></footer>
       </main>
 
-      {selectedTask && <aside className="execution-dock" aria-label="Task execution"><div className="execution-dock-heading"><span>Execution</span><span className={"execution-state execution-state--" + selectedTask.status}>{statusLabel(selectedTask)}</span></div><div className="execution-dock-actions">{selectedTask.status === "running" ? <button className="quiet-button" type="button" onClick={() => void handleCancelTask()}>Cancel run</button> : ["awaiting_review", "changes_requested"].includes(selectedTask.status) ? <button className="quiet-button" type="button" onClick={() => void openReview(selectedTask.id)}>Review changes</button> : <button className="quiet-button" type="button" disabled={selectedTask.status !== "draft"} onClick={() => void handleRunTask()}>Run task</button>}</div>{selectedTaskEvents.length > 0 && <div className="run-output" aria-label="Run output">{selectedTaskEvents.slice(-8).map((event, index) => <div className="run-output-line" key={event.turnId + "-" + index}><span>{event.eventType}</span>{event.error && <small>{event.error}</small>}</div>)}</div>}</aside>}
+      {/* Floating execution dock shown only when no task is open in the main panel */}
+      {selectedTask === null && tasks.some((t) => t.status === "running") && (() => {
+        const runningTask = tasks.find((t) => t.status === "running");
+        if (!runningTask) return null;
+        const runEvents = taskEvents[runningTask.id] ?? [];
+        return (
+          <aside className="execution-dock" aria-label="Task execution">
+            <div className="execution-dock-heading">
+              <span>{runningTask.title}</span>
+              <span className="execution-state execution-state--running">running</span>
+            </div>
+            {runEvents.length > 0 && (
+              <div className="run-output" aria-label="Run output">
+                {runEvents.slice(-5).map((event, index) => (
+                  <div className="run-output-line" key={event.turnId + "-" + index}>
+                    <span>{event.eventType}</span>
+                    {event.error && <small>{event.error}</small>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </aside>
+        );
+      })()}
 
       {reviewModal && (() => { const task = tasks.find((item) => item.id === reviewModal.taskId); return task ? <DiffReviewDialog task={task} /> : null; })()}
 
