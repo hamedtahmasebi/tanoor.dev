@@ -4,7 +4,7 @@ Forge is a Tauri desktop workspace for running Codex tasks in isolated git workt
 
 ## Status
 
-The project is currently in **Phase I — Scaffold**. The UI shell is present, while task persistence and execution are intentionally not wired yet. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the phase handoff and [project-proposal.md](project-proposal.md) for the full v1 design.
+Phases I–IV are implemented pending the documented toolchain and CLI validation. The frontend is an editor-first desktop workflow: a compact project/task tree, inline task composer, `@` file references, `/` commands, and a command palette. Execution orchestration begins in Phase V. See [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md) for the handoff and [project-proposal.md](project-proposal.md) for the full v1 design.
 
 ## Prerequisites
 

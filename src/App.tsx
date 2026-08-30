@@ -1,120 +1,215 @@
-type NavItem = {
-  label: string;
-  icon: string;
-  count?: number;
-  active?: boolean;
-};
+import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useStore } from "./store";
+import { TaskCard } from "./components/TaskCard";
+import { NewTaskDialog } from "./components/NewTaskDialog";
+import type { CreateTaskInput, Task, TaskEvent } from "./types";
 
-const navItems: NavItem[] = [
-  { label: "All tasks", icon: "▦", count: 0, active: true },
-  { label: "Needs review", icon: "◌", count: 0 },
-  { label: "In progress", icon: "↻", count: 0 },
-  { label: "Approved", icon: "✓", count: 0 },
+type NavFilter = "all" | "needs_review" | "in_progress" | "approved";
+
+const NAV_ITEMS: { label: string; icon: string; filter: NavFilter }[] = [
+  { label: "All tasks", icon: "▦", filter: "all" },
+  { label: "Needs review", icon: "◌", filter: "needs_review" },
+  { label: "In progress", icon: "↻", filter: "in_progress" },
+  { label: "Approved", icon: "✓", filter: "approved" },
 ];
 
+const NOOP = () => undefined;
+
+function projectDisplayName(rootPath: string): string {
+  const parts = rootPath.replace(/\\/g, "/").split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? rootPath;
+}
+
+function statusLabel(task: Task): string {
+  return task.status.replace("_", " ");
+}
+
 function App() {
+  const {
+    projects,
+    currentProjectId,
+    tasks,
+    isLoadingProjects,
+    isLoadingTasks,
+    error,
+    addProject,
+    switchProject,
+    createTask,
+    deleteTask,
+    runTask,
+    cancelTask,
+    appendTaskEvent,
+    taskEvents,
+    clearError,
+  } = useStore();
+
+  const [showProjectDropdown, setShowProjectDropdown] = useState(false);
+  const [navFilter, setNavFilter] = useState<NavFilter>("all");
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
+
+  const currentProject = projects.find((project) => project.id === currentProjectId) ?? null;
+  const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
+  const selectedTaskEvents = selectedTask ? (taskEvents[selectedTask.id] ?? []) : [];
+
+  useEffect(() => {
+    void useStore.getState().initApp();
+  }, []);
+
+  useEffect(() => {
+    if (selectedTaskId && !tasks.some((task) => task.id === selectedTaskId)) setSelectedTaskId(null);
+  }, [selectedTaskId, tasks]);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void listen<TaskEvent>("task:" + selectedTaskId + ":event", (event) => {
+      appendTaskEvent(event.payload);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, [appendTaskEvent, selectedTaskId]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const modifier = event.metaKey || event.ctrlKey;
+      if (modifier && event.key.toLowerCase() === "p") {
+        event.preventDefault();
+        setShowCommandPalette(true);
+      }
+      if (modifier && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setSelectedTaskId(null);
+      }
+      if (event.key === "Escape") {
+        setShowCommandPalette(false);
+        setShowProjectDropdown(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const counts: Record<NavFilter, number> = {
+    all: tasks.length,
+    needs_review: tasks.filter((task) => ["awaiting_review", "changes_requested"].includes(task.status)).length,
+    in_progress: tasks.filter((task) => task.status === "running").length,
+    approved: tasks.filter((task) => task.status === "approved").length,
+  };
+
+  const filteredTasks = useMemo(() => tasks.filter((task) => {
+    if (navFilter === "needs_review") return ["awaiting_review", "changes_requested"].includes(task.status);
+    if (navFilter === "in_progress") return task.status === "running";
+    if (navFilter === "approved") return task.status === "approved";
+    return true;
+  }), [navFilter, tasks]);
+
+  const handleAddProject = async () => {
+    setShowProjectDropdown(false);
+    const result = await openDialog({ directory: true, multiple: false, title: "Open git project" });
+    if (typeof result === "string") await addProject(result);
+  };
+
+  const handleCreateTask = async (input: CreateTaskInput) => {
+    if (!currentProjectId) return;
+    const task = await createTask(currentProjectId, input);
+    setSelectedTaskId(task.id);
+  };
+
+  const handleRunTask = async () => {
+    if (selectedTask) await runTask(selectedTask.id);
+  };
+
+  const handleCancelTask = async () => {
+    if (selectedTask) await cancelTask(selectedTask.id);
+  };
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand-lockup">
-          <div className="brand-mark" aria-hidden="true">
-            <span />
-            <span />
-            <span />
-          </div>
-          <div>
-            <p className="brand-name">Forge</p>
-            <p className="brand-subtitle">AI workflow automation</p>
-          </div>
+      <aside className="activity-bar" aria-label="Forge navigation">
+        <div className="forge-mark" aria-label="Forge"><span>F</span></div>
+        <div className="activity-actions">
+          <button className="activity-button active" type="button" title="Tasks" aria-label="Tasks">⌁</button>
+          <button className="activity-button" type="button" title="Changes" aria-label="Changes">⌘</button>
+          <button className="activity-button" type="button" title="Search" aria-label="Search" onClick={() => setShowCommandPalette(true)}>⌕</button>
+        </div>
+        <button className="activity-button activity-settings" type="button" title="Settings" aria-label="Settings">⚙</button>
+      </aside>
+
+      <aside className="workspace-sidebar">
+        <div className="workspace-header">
+          <button className="project-menu" type="button" aria-haspopup="listbox" aria-expanded={showProjectDropdown} onClick={() => setShowProjectDropdown((value) => !value)}>
+            <span className="project-glyph">⌂</span>
+            <span className="project-menu-copy">
+              <span className="project-menu-name">{currentProject ? projectDisplayName(currentProject.rootPath) : "No project"}</span>
+              <span className="project-menu-path">{currentProject?.rootPath ?? "Choose a git repository"}</span>
+            </span>
+            <span className="project-menu-chevron">⌄</span>
+          </button>
+          {showProjectDropdown && (
+            <div className="project-dropdown" role="listbox">
+              {projects.map((project) => (
+                <button key={project.id} className={`project-dropdown-item${project.id === currentProjectId ? " active" : ""}`} type="button" role="option" aria-selected={project.id === currentProjectId} onClick={() => { void switchProject(project.id); setSelectedTaskId(null); setShowProjectDropdown(false); }}>
+                  <span>{projectDisplayName(project.rootPath)}</span><small>{project.rootPath}</small>
+                </button>
+              ))}
+              <button className="project-dropdown-add" type="button" onClick={handleAddProject}>＋ Open project…</button>
+            </div>
+          )}
         </div>
 
-        <div className="project-switcher">
-          <span className="project-icon" aria-hidden="true">⌂</span>
-          <div className="project-copy">
-            <span className="eyebrow">Current project</span>
-            <span className="project-name">No project selected</span>
-          </div>
-          <span className="chevron" aria-hidden="true">⌄</span>
-        </div>
-
-        <nav className="primary-nav" aria-label="Task views">
-          <span className="nav-heading">Workspace</span>
-          {navItems.map((item) => (
-            <button className={`nav-item${item.active ? " active" : ""}`} key={item.label} type="button">
-              <span className="nav-icon" aria-hidden="true">{item.icon}</span>
-              <span>{item.label}</span>
-              <span className="nav-count">{item.count}</span>
+        <nav className="workspace-nav" aria-label="Task filters">
+          {NAV_ITEMS.map((item) => (
+            <button key={item.filter} className={`workspace-nav-item${navFilter === item.filter ? " active" : ""}`} type="button" onClick={() => setNavFilter(item.filter)}>
+              <span className="workspace-nav-icon" aria-hidden="true">{item.icon}</span><span>{item.label}</span><span className="workspace-nav-count">{counts[item.filter]}</span>
             </button>
           ))}
         </nav>
 
-        <div className="sidebar-footer">
-          <button className="footer-link" type="button">
-            <span aria-hidden="true">⚙</span>
-            Settings
-          </button>
-          <div className="agent-status">
-            <span className="status-dot" />
-            <span>Codex agent</span>
-            <span className="status-label">Not connected</span>
-          </div>
+        <div className="task-tree-header"><span>Tasks</span><button type="button" title="New task" aria-label="New task" onClick={() => setSelectedTaskId(null)}>＋</button></div>
+        <div className="task-tree" aria-label="Tasks">
+          {isLoadingProjects || isLoadingTasks ? (
+            <div className="sidebar-loading"><span className="loading-spinner" /> Loading</div>
+          ) : filteredTasks.length === 0 ? (
+            <button className="sidebar-empty" type="button" onClick={() => setSelectedTaskId(null)}><span className="sidebar-empty-plus">＋</span><span>{currentProject ? "Create your first task" : "Open a project to begin"}</span></button>
+          ) : (
+            filteredTasks.map((task) => <TaskCard key={task.id} task={task} active={task.id === selectedTaskId} onSelect={() => setSelectedTaskId(task.id)} onDelete={deleteTask} />)
+          )}
+        </div>
+
+        <div className="workspace-sidebar-footer">
+          <div className="connection-row"><span className="connection-dot" /><span>Codex</span><span className="connection-state">offline</span></div>
+          <div className="shortcut-row"><span>Command palette</span><kbd>⌘ P</kbd></div>
         </div>
       </aside>
 
-      <main className="main-panel">
-        <header className="topbar">
-          <div>
-            <p className="breadcrumb">Workspace <span>/</span> Tasks</p>
-            <h1>All tasks</h1>
-          </div>
-          <div className="topbar-actions">
-            <button className="icon-button" type="button" aria-label="Search tasks">⌕</button>
-            <button className="help-button" type="button" aria-label="Help">?</button>
-            <button className="avatar" type="button" aria-label="Account">HM</button>
-          </div>
+      <main className="editor-panel">
+        <header className="editor-header">
+          <div className="editor-tab"><span className="tab-dot" /><span>{selectedTask ? selectedTask.title : "New task"}</span><span className="tab-close">×</span></div>
+          <div className="editor-header-actions"><button type="button" className="editor-action" onClick={() => setShowCommandPalette(true)}><span>⌘ P</span> Command palette</button><button type="button" className="editor-icon-button" title="More actions" aria-label="More actions">•••</button></div>
         </header>
 
-        <section className="content-area">
-          <div className="page-intro">
-            <div>
-              <p className="section-kicker">Task queue</p>
-              <h2>Build with a clear next step.</h2>
-              <p className="intro-copy">Create a task, give Codex the right context, and review every change before it lands.</p>
-            </div>
-            <button className="primary-button" type="button" disabled title="Task creation arrives in Phase II">
-              <span aria-hidden="true">＋</span>
-              New task
-            </button>
-          </div>
+        {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={clearError}>Dismiss</button></div>}
 
-          <div className="empty-state" role="status">
-            <div className="empty-illustration" aria-hidden="true">
-              <div className="paper-back" />
-              <div className="paper-front">
-                <span />
-                <span />
-                <span />
-              </div>
-              <div className="sparkle sparkle-one">✦</div>
-              <div className="sparkle sparkle-two">✦</div>
-            </div>
-            <h3>Your task queue is empty</h3>
-            <p>Select a project to get started. Task creation and project setup will be available in Phase II.</p>
-            <button className="secondary-button" type="button" disabled>
-              Select a project
-            </button>
-          </div>
+        {!currentProject ? (
+          <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Forge keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
+        ) : selectedTask ? (
+          <section className="task-detail-pane"><div className="detail-breadcrumb"><span>{projectDisplayName(currentProject.rootPath)}</span><span>/</span><span>task</span></div><div className="detail-heading"><div><p className="detail-kicker">{statusLabel(selectedTask)}</p><h1>{selectedTask.title}</h1></div><span className={`detail-status detail-status--${selectedTask.status}`}>{statusLabel(selectedTask)}</span></div><div className="detail-divider" /><p className="detail-prompt">{selectedTask.prompt}</p>{selectedTask.fileRefs.length > 0 && <div className="detail-context"><span className="detail-label">Context</span>{selectedTask.fileRefs.map((ref) => <code key={ref}>@{ref}</code>)}</div>}<div className="detail-actions"><button className="quiet-button" type="button" disabled title="Execution will be enabled in Phase V">Run task <span>⌘ ↵</span></button><span className="detail-note">Execution and review are coming next.</span></div></section>
+        ) : (
+          <NewTaskDialog project={currentProject} onClose={NOOP} onCreate={handleCreateTask} />
+        )}
 
-          <div className="build-note">
-            <span className="note-icon" aria-hidden="true">✦</span>
-            <div>
-              <strong>Phase I scaffold is ready</strong>
-              <p>The shell, navigation, and secure command capability boundary are in place.</p>
-            </div>
-            <span className="note-tag">v0.1</span>
-          </div>
-        </section>
+        <footer className="status-bar"><span className="status-branch">⑂ main</span><span>workspace-write</span><span className="status-spacer" /><span>{currentProject ? projectDisplayName(currentProject.rootPath) : "No workspace"}</span><span>UTF-8</span></footer>
       </main>
+
+      {selectedTask && <aside className="execution-dock" aria-label="Task execution"><div className="execution-dock-heading"><span>Execution</span><span className={"execution-state execution-state--" + selectedTask.status}>{statusLabel(selectedTask)}</span></div><div className="execution-dock-actions">{selectedTask.status === "running" ? <button className="quiet-button" type="button" onClick={() => void handleCancelTask()}>Cancel run</button> : <button className="quiet-button" type="button" disabled={selectedTask.status !== "draft"} onClick={() => void handleRunTask()}>Run task</button>}</div>{selectedTaskEvents.length > 0 && <div className="run-output" aria-label="Run output">{selectedTaskEvents.slice(-8).map((event, index) => <div className="run-output-line" key={event.turnId + "-" + index}><span>{event.eventType}</span>{event.error && <small>{event.error}</small>}</div>)}</div>}</aside>}
+
+      {showCommandPalette && <div className="command-overlay" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setShowCommandPalette(false); }}><div className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette"><div className="command-input-row"><span>⌕</span><input autoFocus placeholder="Search commands…" onKeyDown={(event) => { if (event.key === "Escape") setShowCommandPalette(false); }} /></div><div className="command-group-label">Suggestions</div><button type="button" className="command-item" onClick={() => { setSelectedTaskId(null); setShowCommandPalette(false); }}><span className="command-item-icon">＋</span><span>New task</span><kbd>⌘ N</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">⌁</span><span>Compact conversation</span><kbd>/ compact</kbd></button><button type="button" className="command-item" onClick={() => setShowCommandPalette(false)}><span className="command-item-icon">◈</span><span>Change model</span><kbd>/ model</kbd></button><button type="button" className="command-item" onClick={handleAddProject}><span className="command-item-icon">⌂</span><span>Open project</span><kbd>⌘ O</kbd></button></div></div>}
     </div>
   );
 }

@@ -14,7 +14,7 @@ Create a launchable Tauri v2 desktop shell with a React/TypeScript/Vite frontend
 - [x] React + TypeScript + Vite frontend exists.
 - [x] Shell, dialog, filesystem, and window-state plugins are registered.
 - [x] The capability file exposes only `codex` and `git` as external commands.
-- [x] The initial screen includes project selection context, task navigation, and an empty task panel.
+- [x] The initial screen includes project selection context, task navigation, and an editor-first task panel.
 - [x] The project has setup instructions and a documented handoff for the next conversation.
 - [ ] Local build and desktop launch verified — blocked by missing Node/npm in the current environment.
 
@@ -28,7 +28,9 @@ Create a launchable Tauri v2 desktop shell with a React/TypeScript/Vite frontend
 
 ## Implementation notes
 
-- The frontend is intentionally static. Disabled “New task” and “Select a project” controls communicate the boundary between scaffold work and Phase II.
+- The frontend uses a compact desktop-tool layout: activity rail, project/task tree, editor chrome, status bar, and neutral low-contrast colors inspired by modern code editors.
+- Task creation is an inline editor workflow rather than a web-style modal. The composer supports `@` project-file references, `/` command suggestions, keyboard shortcuts, and the existing Phase II persistence API.
+- Execution controls remain visibly staged until Phase V connects the runner, worktrees, and lifecycle state transitions.
 - The shell plugin is initialized now, but no command is invoked until later orchestration work.
 - `fs:default` and `dialog:default` are registered for the scoped project/file picking work planned in Phase II; their UI use is not implemented yet.
 - The frontend package uses major-version ranges for Tauri v2 packages. The first dependency install should generate and commit a lockfile once the supported Node/npm toolchain is available.
