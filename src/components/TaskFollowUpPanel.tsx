@@ -1,6 +1,8 @@
 import { useEffect, useRef, useMemo, useState } from "react";
+import { parseUnifiedDiff } from "../diff";
 import { useStore } from "../store";
-import type { Task, TaskStatus, TaskTurn, TaskEvent } from "../types";
+import { commentLocation, isTaskReviewable } from "./ReviewScreen";
+import type { ReviewComment, Task, TaskStatus, TaskTurn, TaskEvent } from "../types";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,11 +19,17 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   cancelled: "Cancelled",
 };
 
-const STATUS_STEPS: TaskStatus[] = [
-  "draft",
-  "running",
-  "awaiting_review",
-  "approved",
+/**
+ * The four pipeline stages. Each one maps to a section of the panel that stays
+ * reachable for the whole life of the task — including after it finished.
+ */
+export type StageId = "request" | "run" | "review" | "result";
+
+const STAGE_STEPS: { id: StageId; status: TaskStatus }[] = [
+  { id: "request", status: "draft" },
+  { id: "run", status: "running" },
+  { id: "review", status: "awaiting_review" },
+  { id: "result", status: "approved" },
 ];
 
 /** Returns a 0-4 progress index for the stepper. */
@@ -120,36 +128,70 @@ function summariseLine(raw: string): string | null {
 
 interface StatusStepperProps {
   status: TaskStatus;
+  /** Stages that have recorded content and can therefore be revealed. */
+  available: Record<StageId, boolean>;
+  onSelect: (stage: StageId) => void;
 }
 
-function StatusStepper({ status }: StatusStepperProps) {
+function StatusStepper({ status, available, onSelect }: StatusStepperProps) {
   const current = stepIndex(status);
   const isError = current === -1;
+  const stepperRef = useRef<HTMLDivElement>(null);
+
+  // Horizontal control: arrow keys walk the selectable stages with wrap-around.
+  const moveFocus = (direction: 1 | -1) => {
+    const steps = Array.from(stepperRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? []);
+    if (steps.length === 0) return;
+    const index = steps.findIndex((step) => step === document.activeElement);
+    steps[(index + direction + steps.length) % steps.length].focus();
+  };
+
+  const stage = (id: StageId, label: string, dot: React.ReactNode, dotClass: string, labelClass: string) => (
+    <button
+      type="button"
+      className="followup-step-nav"
+      disabled={!available[id]}
+      aria-current={!isError && STAGE_STEPS[current]?.id === id ? "step" : undefined}
+      title={!available[id] ? `${label} — nothing recorded yet` : id === "review" ? "Open the changes & review screen" : `Show ${label.toLowerCase()}`}
+      onClick={() => onSelect(id)}
+    >
+      <span className={dotClass}>{dot}</span>
+      <span className={labelClass}>{label}</span>
+    </button>
+  );
 
   return (
-    <div className="followup-stepper">
-      {STATUS_STEPS.map((step, i) => {
+    <div
+      ref={stepperRef}
+      className="followup-stepper"
+      role="group"
+      aria-label="Task pipeline"
+      onKeyDown={(event) => {
+        if (event.key === "ArrowRight") { event.preventDefault(); moveFocus(1); }
+        else if (event.key === "ArrowLeft") { event.preventDefault(); moveFocus(-1); }
+      }}
+    >
+      {STAGE_STEPS.map(({ id, status: step }, i) => {
         const completed = !isError && i < current;
         const active = !isError && i === current;
         const label = i === current ? stepLabel(status) : stepLabel(step);
         return (
-          <div key={step} className="followup-step">
-            <div className={[
-              "followup-step-dot",
-              completed ? "followup-step-dot--done" : "",
-              active ? "followup-step-dot--active" : "",
-              isError && i === 1 ? "followup-step-dot--error" : "",
-            ].filter(Boolean).join(" ")}>
-              {completed ? "✓" : active && status === "running"
-                ? <span className="followup-step-spinner" />
-                : i + 1}
-            </div>
-            <span className={[
-              "followup-step-label",
-              active ? "followup-step-label--active" : "",
-              completed ? "followup-step-label--done" : "",
-            ].filter(Boolean).join(" ")}>{label}</span>
-            {i < STATUS_STEPS.length - 1 && (
+          <div key={id} className="followup-step">
+            {stage(id, label,
+              completed ? "✓" : active && status === "running" ? <span className="followup-step-spinner" /> : i + 1,
+              [
+                "followup-step-dot",
+                completed ? "followup-step-dot--done" : "",
+                active ? "followup-step-dot--active" : "",
+                isError && i === 1 ? "followup-step-dot--error" : "",
+              ].filter(Boolean).join(" "),
+              [
+                "followup-step-label",
+                active ? "followup-step-label--active" : "",
+                completed ? "followup-step-label--done" : "",
+              ].filter(Boolean).join(" "),
+            )}
+            {i < STAGE_STEPS.length - 1 && (
               <div className={`followup-step-line${completed ? " followup-step-line--done" : ""}`} />
             )}
           </div>
@@ -157,10 +199,9 @@ function StatusStepper({ status }: StatusStepperProps) {
       })}
       {isError && (
         <div className="followup-step">
-          <div className="followup-step-dot followup-step-dot--error">✗</div>
-          <span className="followup-step-label followup-step-label--error">
-            {STATUS_LABELS[status] ?? status}
-          </span>
+          {stage("result", STATUS_LABELS[status] ?? status, "✗",
+            "followup-step-dot followup-step-dot--error",
+            "followup-step-label followup-step-label--error")}
         </div>
       )}
     </div>
@@ -221,6 +262,12 @@ function OutputBlock({ turn, savedLines, liveEvents, isActive }: OutputBlockProp
         <span className={`followup-turn-status ${statusClass}`}>{turn.status}</span>
         <span className="followup-turn-time">{new Date(turn.startedAt).toLocaleTimeString()}</span>
       </div>
+      {turn.prompt.trim() && (
+        <details className="followup-turn-prompt">
+          <summary>{turn.kind === "initial" ? "Prompt sent to the agent" : "Review feedback sent to the agent"}</summary>
+          <pre>{turn.prompt}</pre>
+        </details>
+      )}
       {combinedLines.length === 0 ? (
         isActive ? (
           <div className="followup-output-waiting">
@@ -252,7 +299,8 @@ interface Props {
   onRunTask: () => void;
   onRetryTask: () => void;
   onCancelTask: () => void;
-  onOpenReview: () => void;
+  /** Opens the review screen, optionally deep-linked to one comment. */
+  onOpenReview: (focusCommentId?: string) => void;
 }
 
 export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, onOpenReview }: Props) {
@@ -262,29 +310,35 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
     taskEvents,
     isLoadingTaskOutput,
     loadTaskOutput,
+    reviewComments,
+    loadReviewComments,
     editors,
     openInEditor,
   } = useStore();
   const [showEditorDropdown, setShowEditorDropdown] = useState(false);
   const [focusedEditor, setFocusedEditor] = useState(0);
   const editorListRef = useRef<HTMLDivElement>(null);
+  const stageRefs = useRef<Partial<Record<StageId, HTMLDivElement | null>>>({});
 
   const turns: TaskTurn[] = taskTurns[task.id] ?? [];
   const liveEvents = taskEvents[task.id] ?? [];
+  const comments: ReviewComment[] = reviewComments[task.id] ?? [];
 
-  // Load saved output whenever the task changes
+  // Load saved output and the review history whenever the task changes
   useEffect(() => {
     void loadTaskOutput(task.id);
-  }, [task.id, loadTaskOutput]);
+    void loadReviewComments(task.id, { silent: true });
+  }, [task.id, loadTaskOutput, loadReviewComments]);
 
   // Re-fetch saved output when the task finishes a run (status leaves "running")
   const prevStatusRef = useRef(task.status);
   useEffect(() => {
     if (prevStatusRef.current === "running" && task.status !== "running") {
       void loadTaskOutput(task.id);
+      void loadReviewComments(task.id, { silent: true });
     }
     prevStatusRef.current = task.status;
-  }, [task.status, task.id, loadTaskOutput]);
+  }, [task.status, task.id, loadTaskOutput, loadReviewComments]);
 
   // Group live events by turn
   const liveByTurn = useMemo(() => {
@@ -325,7 +379,49 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
   const isRunning = task.status === "running";
   const canRun = task.status === "draft" || task.status === "ready";
   const canRetry = task.status === "failed" || task.status === "cancelled";
-  const needsReview = task.status === "awaiting_review" || task.status === "changes_requested";
+  const needsReview = isTaskReviewable(task);
+  const isFinished = task.status === "approved" || task.status === "failed" || task.status === "cancelled";
+
+  // Diff totals for the review stage summary. The diff is kept on the task row
+  // after approval, so these stay meaningful for finished tasks.
+  const diffStats = useMemo(() => {
+    const files = parseUnifiedDiff(task.diff ?? "");
+    return {
+      files: files.length,
+      additions: files.reduce((total, file) => total + file.additions, 0),
+      deletions: files.reduce((total, file) => total + file.deletions, 0),
+    };
+  }, [task.diff]);
+  const hasChanges = Boolean(task.diff?.trim());
+  const canOpenReview = hasChanges || comments.length > 0;
+
+  // Comments grouped by the turn they were left on, i.e. one group per review
+  // round, in chronological order.
+  const commentRounds = useMemo(() => {
+    const order = new Map(turns.map((turn, index) => [turn.id, index]));
+    const groups = new Map<string, ReviewComment[]>();
+    for (const comment of comments) {
+      const group = groups.get(comment.turnId);
+      if (group) group.push(comment);
+      else groups.set(comment.turnId, [comment]);
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => (order.get(a) ?? Number.MAX_SAFE_INTEGER) - (order.get(b) ?? Number.MAX_SAFE_INTEGER))
+      .map(([turnId, items], index) => ({ turnId, items, round: index + 1, turn: turns.find((turn) => turn.id === turnId) ?? null }));
+  }, [comments, turns]);
+
+  const stageAvailable: Record<StageId, boolean> = {
+    request: true,
+    run: allTurns.length > 0 || isRunning,
+    review: canOpenReview || needsReview,
+    result: isFinished,
+  };
+  // The review stage lives on its own screen, so its step deep-links there
+  // instead of scrolling to the summary card.
+  const revealStage = (stage: StageId) => {
+    if (stage === "review") { onOpenReview(); return; }
+    stageRefs.current[stage]?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
 
   const selectEditor = (editorId: string) => {
     setShowEditorDropdown(false);
@@ -351,7 +447,7 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
           </span>
         </div>
 
-        <StatusStepper status={task.status} />
+        <StatusStepper status={task.status} available={stageAvailable} onSelect={revealStage} />
 
         <div className="followup-actions">
           {isRunning && (
@@ -377,9 +473,9 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
               {editors.map((editor, index) => <button key={editor.id} className="project-dropdown-item" type="button" role="option" aria-selected={index === focusedEditor} tabIndex={index === focusedEditor ? 0 : -1} onFocus={() => setFocusedEditor(index)} onClick={() => selectEditor(editor.id)}><span>{editor.label}</span><small>{editor.command}</small></button>)}
             </div>}
           </div>
-          {needsReview && (
-            <button className="quiet-button" type="button" onClick={onOpenReview}>
-              Review changes
+          {canOpenReview && (
+            <button className="quiet-button" type="button" onClick={() => onOpenReview()}>
+              {needsReview ? "Review changes" : "View changes"}
             </button>
           )}
         </div>
@@ -387,8 +483,8 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
 
       <div className="followup-divider" />
 
-      {/* ── Prompt ── */}
-      <div className="followup-prompt-section">
+      {/* ── Stage 1: request ── */}
+      <div className="followup-prompt-section" ref={(node) => { stageRefs.current.request = node; }}>
         <span className="detail-label">Prompt</span>
         <p className="detail-prompt">{task.prompt}</p>
         {task.fileRefs.length > 0 && (
@@ -397,13 +493,19 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
             {task.fileRefs.map((ref) => <code key={ref}>@{ref}</code>)}
           </div>
         )}
+        {task.agentId && (
+          <div className="detail-context" style={{ marginTop: 12 }}>
+            <span className="detail-label">Agent</span>
+            <code>{[task.agentId, task.agentModel, task.agentEffort].filter(Boolean).join(" · ")}</code>
+          </div>
+        )}
       </div>
 
-      {/* ── Agent output ── */}
+      {/* ── Stage 2: run ── */}
       {(allTurns.length > 0 || isRunning) && (
         <>
           <div className="followup-divider" />
-          <div className="followup-output-section">
+          <div className="followup-output-section" ref={(node) => { stageRefs.current.run = node; }}>
             <span className="detail-label">Agent output</span>
             {isLoadingTaskOutput && allTurns.length === 0 ? (
               <div className="followup-output-waiting">
@@ -427,17 +529,84 @@ export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, 
       )}
 
       {/* ── Review card ── */}
-      {needsReview && (
+      {/* ── Stage 3: review ── */}
+      {stageAvailable.review && (
         <>
           <div className="followup-divider" />
-          <div className="detail-review-card">
-            <div>
-              <strong>Changes are ready for review</strong>
-              <span>Inspect the cumulative diff and leave line-level feedback.</span>
+          <div className="followup-review-section" ref={(node) => { stageRefs.current.review = node; }}>
+            <span className="detail-label">Changes &amp; review</span>
+            <div className="detail-review-card">
+              <div>
+                <strong>{needsReview ? "Changes are ready for review" : hasChanges ? "Recorded changes" : "No recorded changes"}</strong>
+                <span>
+                  {needsReview
+                    ? "Inspect the cumulative diff and leave line-level feedback."
+                    : hasChanges
+                      ? `${diffStats.files} ${diffStats.files === 1 ? "file" : "files"} · +${diffStats.additions} −${diffStats.deletions} · read-only`
+                      : "This task never produced a cumulative diff."}
+                </span>
+              </div>
+              <button className="quiet-button" type="button" disabled={!canOpenReview} title={canOpenReview ? undefined : "Nothing was recorded for this task yet"} onClick={() => onOpenReview()}>
+                {needsReview ? "Review changes" : "View changes"}
+              </button>
             </div>
-            <button className="quiet-button" type="button" onClick={onOpenReview}>
-              Review changes
-            </button>
+
+            {commentRounds.length > 0 && (
+              <div className="followup-comment-rounds">
+                {commentRounds.map(({ turnId, items, round, turn }) => (
+                  <div className="followup-comment-round" key={turnId}>
+                    <div className="followup-comment-round-header">
+                      <span>Review round {round}{turn ? ` · ${turn.kind === "initial" ? "initial run" : "follow-up"}` : ""}</span>
+                      <span>{items.filter((comment) => !comment.resolved).length} open · {items.filter((comment) => comment.resolved).length} resolved</span>
+                    </div>
+                    {items.map((comment) => (
+                      <article className={`review-comment${comment.resolved ? " resolved" : ""}`} key={comment.id}>
+                        <div>
+                          <span>{comment.resolved ? "Resolved" : "Open"}</span>
+                          <time>{new Date(comment.createdAt).toLocaleString()}</time>
+                        </div>
+                        <code className="followup-comment-anchor">{commentLocation(comment)}</code>
+                        <p>{comment.body}</p>
+                        {comment.assignedAgentId && (
+                          <div className="review-comment-assignment">
+                            <label>Sent to <code>{[comment.assignedAgentId, comment.assignedModel, comment.assignedEffort].filter(Boolean).join(" · ")}</code></label>
+                          </div>
+                        )}
+                        <button type="button" onClick={() => onOpenReview(comment.id)}>View in diff →</button>
+                      </article>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ── Stage 4: result ── */}
+      {isFinished && (
+        <>
+          <div className="followup-divider" />
+          <div className="followup-result-section" ref={(node) => { stageRefs.current.result = node; }}>
+            <span className="detail-label">Result</span>
+            <div className="detail-review-card">
+              <div>
+                <strong>
+                  {task.status === "approved" ? "Task approved" : task.status === "failed" ? "Run failed" : "Run cancelled"}
+                </strong>
+                <span>
+                  {task.status === "approved"
+                    ? task.branchName
+                      ? `Committed on ${task.branchName}; the worktree was removed.`
+                      : "Committed and merged into the project branch."
+                    : "The full agent output above records what happened before the run stopped."}
+                </span>
+                <span>Last updated {new Date(task.updatedAt).toLocaleString()}</span>
+              </div>
+              <button className="quiet-button" type="button" disabled={!canOpenReview} title={canOpenReview ? undefined : "This task has no recorded diff"} onClick={() => onOpenReview()}>
+                View changes
+              </button>
+            </div>
           </div>
         </>
       )}

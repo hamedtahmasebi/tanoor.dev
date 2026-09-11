@@ -31,6 +31,15 @@ export interface DiffFile {
   binary: boolean;
 }
 
+/** One row of the side-by-side view: old line on the left, new on the right. */
+export interface SplitRow {
+  id: string;
+  left: DiffLine | null;
+  right: DiffLine | null;
+  /** Set for full-width rows such as "\ No newline at end of file". */
+  meta: DiffLine | null;
+}
+
 interface MutableFile extends DiffFile {
   renameFrom?: string;
   renameTo?: string;
@@ -73,6 +82,39 @@ function finishFile(file: MutableFile): DiffFile {
   file.id = `${file.oldPath ?? "/dev/null"}->${file.newPath ?? "/dev/null"}`;
   const { renameFrom: _renameFrom, renameTo: _renameTo, ...result } = file;
   return result;
+}
+
+/**
+ * Pair unified-diff lines into side-by-side rows: context lines occupy both
+ * columns, and each run of deletions is zipped with the additions that replace
+ * it so rewritten lines sit opposite each other.
+ */
+export function toSplitRows(lines: DiffLine[]): SplitRow[] {
+  const rows: SplitRow[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (line.kind === "context") {
+      rows.push({ id: line.id, left: line, right: line, meta: null });
+      index += 1;
+      continue;
+    }
+    if (line.kind === "meta") {
+      rows.push({ id: line.id, left: null, right: null, meta: line });
+      index += 1;
+      continue;
+    }
+    const deletions: DiffLine[] = [];
+    const additions: DiffLine[] = [];
+    while (index < lines.length && lines[index].kind === "deletion") deletions.push(lines[index++]);
+    while (index < lines.length && lines[index].kind === "addition") additions.push(lines[index++]);
+    for (let offset = 0; offset < Math.max(deletions.length, additions.length); offset += 1) {
+      const left = deletions[offset] ?? null;
+      const right = additions[offset] ?? null;
+      rows.push({ id: `${left?.id ?? "-"}|${right?.id ?? "-"}`, left, right, meta: null });
+    }
+  }
+  return rows;
 }
 
 /** Parse the cumulative `git diff` text used by Tanoor's review screen. */

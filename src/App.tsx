@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./store";
 import { TaskCard } from "./components/TaskCard";
 import { NewTaskDialog } from "./components/NewTaskDialog";
-import { ReviewScreen } from "./components/ReviewScreen";
+import { ReviewScreen, isTaskReviewable } from "./components/ReviewScreen";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskFollowUpPanel } from "./components/TaskFollowUpPanel";
 import type { CreateTaskInput, TaskEvent } from "./types";
@@ -61,6 +61,7 @@ function App() {
   const [navFilter, setNavFilter] = useState<NavFilter>("all");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const currentProject = projects.find((project) => project.id === currentProjectId) ?? null;
   const selectedTask = tasks.find((task) => task.id === selectedTaskId) ?? null;
@@ -96,6 +97,10 @@ function App() {
         event.preventDefault();
         setSelectedTaskId(null);
       }
+      if (modifier && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        setSidebarCollapsed((value) => !value);
+      }
       if (event.key === "Escape") {
         setShowCommandPalette(false);
         setShowProjectDropdown(false);
@@ -109,13 +114,13 @@ function App() {
 
   const counts: Record<NavFilter, number> = {
     all: tasks.length,
-    needs_review: tasks.filter((task) => ["awaiting_review", "changes_requested"].includes(task.status)).length,
+    needs_review: tasks.filter(isTaskReviewable).length,
     in_progress: tasks.filter((task) => task.status === "running").length,
     approved: tasks.filter((task) => task.status === "approved").length,
   };
 
   const filteredTasks = useMemo(() => tasks.filter((task) => {
-    if (navFilter === "needs_review") return ["awaiting_review", "changes_requested"].includes(task.status);
+    if (navFilter === "needs_review") return isTaskReviewable(task);
     if (navFilter === "in_progress") return task.status === "running";
     if (navFilter === "approved") return task.status === "approved";
     return true;
@@ -151,13 +156,13 @@ function App() {
         <div className="tanoor-mark" aria-label="Tanoor"><span>T</span></div>
         <div className="activity-actions">
           <button className="activity-button active" type="button" title="Tasks" aria-label="Tasks">⌁</button>
-          <button className="activity-button" type="button" title="Changes" aria-label="Changes" onClick={() => { const reviewTask = tasks.find((task) => ["awaiting_review", "changes_requested"].includes(task.status)); if (reviewTask) { setSelectedTaskId(reviewTask.id); void openReview(reviewTask.id); } }}>⌘</button>
+          <button className="activity-button" type="button" title="Changes" aria-label="Changes" onClick={() => { const target = (selectedTask && (isTaskReviewable(selectedTask) || selectedTask.diff?.trim()) ? selectedTask : null) ?? tasks.find(isTaskReviewable) ?? tasks.find((task) => task.diff?.trim()); if (target) { setSelectedTaskId(target.id); void openReview(target.id); } }}>⌘</button>
           <button className="activity-button" type="button" title="Search" aria-label="Search" onClick={() => setShowCommandPalette(true)}>⌕</button>
         </div>
         <button className={`activity-button activity-settings${isSettingsOpen ? " active" : ""}`} type="button" title="Settings" aria-label="Settings" onClick={() => { closeReview(); openSettings(); }}>⚙</button>
       </aside>
 
-      <aside className="workspace-sidebar">
+      <aside className={`workspace-sidebar${sidebarCollapsed ? " collapsed" : ""}`}>
         <div className="workspace-header">
           <button className="project-menu" type="button" aria-haspopup="listbox" aria-expanded={showProjectDropdown} onClick={() => setShowProjectDropdown((value) => !value)}>
             <span className="project-glyph">⌂</span>
@@ -201,37 +206,41 @@ function App() {
         <div className="workspace-sidebar-footer">
           <button className="connection-row" type="button" onClick={openSettings}><span className={`connection-dot${systemHealth?.codex.binaryFound ? " online" : ""}`} /><span>Codex</span><span className="connection-state">{systemHealth?.codex.authStatus === "authenticated" ? "ready" : systemHealth?.codex.binaryFound ? "auth needed" : "offline"}</span></button>
           <div className="shortcut-row"><span>Command palette</span><kbd>⌘ P</kbd></div>
+          <div className="shortcut-row"><span>Toggle sidebar</span><kbd>⌘ B</kbd></div>
         </div>
       </aside>
 
       <main className="editor-panel">
         <header className="editor-header">
+          <button type="button" className="sidebar-toggle" aria-expanded={!sidebarCollapsed} aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"} title={`${sidebarCollapsed ? "Show" : "Hide"} sidebar ⌘ B`} onClick={() => setSidebarCollapsed((value) => !value)}>{sidebarCollapsed ? "»" : "«"}</button>
           <div className="editor-tab"><span className="tab-dot" /><span>{selectedTask ? selectedTask.title : "New task"}</span><span className="tab-close">×</span></div>
           <div className="editor-header-actions"><button type="button" className="editor-action" onClick={() => setShowCommandPalette(true)}><span>⌘ P</span> Command palette</button><button type="button" className="editor-icon-button" title="More actions" aria-label="More actions">•••</button></div>
         </header>
 
         {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={clearError}>Dismiss</button></div>}
 
-        {!currentProject ? (
-          <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Tanoor keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
-        ) : selectedTask ? (
-          reviewTaskId === selectedTask.id ? <ReviewScreen task={selectedTask} /> : <section className="task-detail-pane">
-            <TaskFollowUpPanel
-              task={selectedTask}
-              onRunTask={() => void handleRunTask()}
-              onRetryTask={() => void handleRetryTask()}
-              onCancelTask={() => void handleCancelTask()}
-              onOpenReview={() => void openReview(selectedTask.id)}
+        <div className="editor-scroll">
+          {!currentProject ? (
+            <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Tanoor keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
+          ) : selectedTask ? (
+            reviewTaskId === selectedTask.id ? <ReviewScreen task={selectedTask} /> : <section className="task-detail-pane">
+              <TaskFollowUpPanel
+                task={selectedTask}
+                onRunTask={() => void handleRunTask()}
+                onRetryTask={() => void handleRetryTask()}
+                onCancelTask={() => void handleCancelTask()}
+                onOpenReview={(focusCommentId) => void openReview(selectedTask.id, focusCommentId)}
+              />
+            </section>
+          ) : (
+            <NewTaskDialog
+              project={currentProject}
+              onClose={NOOP}
+              onCreate={handleCreateTask}
+              onOpenModelPicker={(open) => { openModelPickerRef.current = open; }}
             />
-          </section>
-        ) : (
-          <NewTaskDialog
-            project={currentProject}
-            onClose={NOOP}
-            onCreate={handleCreateTask}
-            onOpenModelPicker={(open) => { openModelPickerRef.current = open; }}
-          />
-        )}
+          )}
+        </div>
 
         <footer className="status-bar"><span className="status-branch">⑂ main</span><span>workspace-write</span><span className="status-spacer" /><span>{currentProject ? projectDisplayName(currentProject.rootPath) : "No workspace"}</span><span>UTF-8</span></footer>
       </main>

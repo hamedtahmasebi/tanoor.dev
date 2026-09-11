@@ -19,6 +19,7 @@ import type {
 } from "./types";
 
 export type ReviewStep = "review" | "confirm" | "request_changes";
+export type DiffViewMode = "unified" | "split";
 
 
 // ---------------------------------------------------------------------------
@@ -36,6 +37,9 @@ interface AppState {
   reviewComments: Record<string, ReviewComment[]>;
   reviewTaskId: string | null;
   reviewStep: ReviewStep;
+  /** Comment the review screen should scroll to and highlight after opening. */
+  reviewFocusCommentId: string | null;
+  diffViewMode: DiffViewMode;
   editors: EditorInfo[];
   settings: AppSettings | null;
   systemHealth: SystemHealthStatus | null;
@@ -72,10 +76,13 @@ interface AppState {
   cancelTask: (taskId: string) => Promise<void>;
   appendTaskEvent: (event: TaskEvent) => void;
   loadTaskOutput: (taskId: string) => Promise<void>;
-  openReview: (taskId: string) => Promise<void>;
+  openReview: (taskId: string, focusCommentId?: string | null) => Promise<void>;
   setReviewStep: (step: ReviewStep) => void;
+  clearReviewFocus: () => void;
+  setDiffViewMode: (mode: DiffViewMode) => void;
   closeReview: () => void;
-  loadReviewComments: (taskId: string) => Promise<void>;
+  /** `silent` skips the loading flag and error banner, for background refreshes. */
+  loadReviewComments: (taskId: string, options?: { silent?: boolean }) => Promise<void>;
   addReviewComment: (taskId: string, input: AddReviewCommentInput) => Promise<void>;
   resolveReviewComment: (taskId: string, commentId: string) => Promise<void>;
   assignReviewComment: (taskId: string, commentId: string, agentId: string | null, model: string | null, effort: string | null) => Promise<void>;
@@ -105,6 +112,8 @@ export const useStore = create<AppState>((set, get) => ({
   reviewComments: {},
   reviewTaskId: null,
   reviewStep: "review",
+  reviewFocusCommentId: null,
+  diffViewMode: "unified",
   editors: [],
   settings: null,
   systemHealth: null,
@@ -328,8 +337,8 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  openReview: async (taskId: string) => {
-    set({ reviewTaskId: taskId, reviewStep: "review" });
+  openReview: async (taskId: string, focusCommentId?: string | null) => {
+    set({ reviewTaskId: taskId, reviewStep: "review", reviewFocusCommentId: focusCommentId ?? null });
     await get().openModelDialog();
     try {
       await get().loadReviewComments(taskId);
@@ -342,17 +351,25 @@ export const useStore = create<AppState>((set, get) => ({
 
   setReviewStep: (step: ReviewStep) => set({ reviewStep: step }),
 
-  closeReview: () => set({ reviewTaskId: null }),
+  clearReviewFocus: () => set({ reviewFocusCommentId: null }),
 
-  loadReviewComments: async (taskId: string) => {
-    set({ isLoadingReview: true, error: null });
+  setDiffViewMode: (mode: DiffViewMode) => set({ diffViewMode: mode }),
+
+  closeReview: () => set({ reviewTaskId: null, reviewFocusCommentId: null }),
+
+  loadReviewComments: async (taskId: string, options?: { silent?: boolean }) => {
+    const silent = options?.silent ?? false;
+    if (!silent) set({ isLoadingReview: true, error: null });
     try {
       const comments = await api.listReviewComments(taskId);
       set((state) => ({
         reviewComments: { ...state.reviewComments, [taskId]: comments },
-        isLoadingReview: false,
+        ...(silent ? {} : { isLoadingReview: false }),
       }));
     } catch (e) {
+      // A background refresh keeps the current view instead of hijacking the
+      // error banner; the review screen reports the failure when opened.
+      if (silent) return;
       set({ error: String(e), isLoadingReview: false });
       throw e;
     }

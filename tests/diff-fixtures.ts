@@ -1,4 +1,4 @@
-import { parseUnifiedDiff } from "../src/diff.js";
+import { parseUnifiedDiff, toSplitRows } from "../src/diff.js";
 
 function equal(actual: unknown, expected: unknown, message: string) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
@@ -24,6 +24,19 @@ index 1111111..0000000
 @@ -1,2 +0,0 @@
 -old
 -content
+`;
+
+const rewritten = `diff --git a/src/pair.ts b/src/pair.ts
+index 1111111..2222222 100644
+--- a/src/pair.ts
++++ b/src/pair.ts
+@@ -1,5 +1,4 @@
+ keep
+-drop one
+-drop two
++add one
+ context
++trailing add
 `;
 
 const renamed = `diff --git "a/old name.txt" "b/new name.txt"
@@ -54,6 +67,25 @@ equal(
   [removedFile.status, removedFile.oldPath, removedFile.newPath, removedFile.additions, removedFile.deletions],
   ["deleted", "legacy.txt", null, 0, 2],
   "removed-file fixture",
+);
+
+const [rewrittenFile] = parseUnifiedDiff(rewritten);
+const splitRows = toSplitRows(rewrittenFile.hunks[0].lines);
+equal(
+  splitRows.map((row) => [row.left?.oldLineNumber ?? null, row.right?.newLineNumber ?? null]),
+  [[1, 1], [2, 2], [3, null], [4, 3], [null, 4]],
+  "split rows zip deletions with their replacements",
+);
+equal(
+  splitRows.map((row) => [row.left?.kind ?? null, row.right?.kind ?? null]),
+  [
+    ["context", "context"],
+    ["deletion", "addition"],
+    ["deletion", null],
+    ["context", "context"],
+    [null, "addition"],
+  ],
+  "split row kinds",
 );
 
 const [renamedFile] = parseUnifiedDiff(renamed);
