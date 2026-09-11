@@ -143,6 +143,47 @@ fn run_migrations(conn: &Connection) -> Result<(), AppError> {
              INSERT OR REPLACE INTO _schema_version VALUES (4);",
         )?;
     }
+    if version < 5 {
+        conn.execute_batch(
+            "ALTER TABLE turn ADD COLUMN agent_id TEXT;
+             ALTER TABLE turn ADD COLUMN agent_model TEXT;
+             ALTER TABLE turn ADD COLUMN agent_effort TEXT;
+             ALTER TABLE turn ADD COLUMN agent_thread_id TEXT;
+             ALTER TABLE review_comment ADD COLUMN assigned_agent_id TEXT;
+             ALTER TABLE review_comment ADD COLUMN assigned_model TEXT;
+             ALTER TABLE review_comment ADD COLUMN assigned_effort TEXT;
+             INSERT OR IGNORE INTO settings (key, value) VALUES
+                 ('default_agent', 'codex'),
+                 ('claude_bin', 'claude'),
+                 ('claude_model', 'sonnet'),
+                 ('opencode_bin', 'opencode'),
+                 ('opencode_model', 'anthropic/claude-sonnet-4-5');
+             UPDATE turn SET agent_id = 'codex' WHERE agent_id IS NULL;
+             INSERT OR REPLACE INTO _schema_version VALUES (5);",
+        )?;
+    }
+    if version < 6 {
+        conn.execute_batch(
+            "ALTER TABLE task ADD COLUMN agent_id TEXT;
+             ALTER TABLE task ADD COLUMN agent_model TEXT;
+             ALTER TABLE task ADD COLUMN agent_effort TEXT;
+             INSERT OR REPLACE INTO _schema_version VALUES (6);",
+        )?;
+    }
+    if version < 7 {
+        let has_line_end: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('review_comment') WHERE name = 'line_end_number'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_line_end {
+            conn.execute(
+                "ALTER TABLE review_comment ADD COLUMN line_end_number INTEGER",
+                [],
+            )?;
+        }
+        conn.execute("INSERT OR REPLACE INTO _schema_version VALUES (7)", [])?;
+    }
     Ok(())
 }
 
@@ -169,6 +210,11 @@ pub fn select_settings(conn: &Connection) -> Result<AppSettings, AppError> {
             "merge_on_confirm" => settings.merge_on_confirm = value == "true",
             "codex_model" if !value.trim().is_empty() => settings.codex_model = value,
             "codex_effort" if !value.trim().is_empty() => settings.codex_effort = value,
+            "default_agent" if !value.trim().is_empty() => settings.default_agent = value,
+            "claude_bin" if !value.trim().is_empty() => settings.claude_bin = value,
+            "claude_model" if !value.trim().is_empty() => settings.claude_model = value,
+            "opencode_bin" if !value.trim().is_empty() => settings.opencode_bin = value,
+            "opencode_model" if !value.trim().is_empty() => settings.opencode_model = value,
             _ => {}
         }
     }
@@ -187,6 +233,11 @@ pub fn replace_settings(conn: &mut Connection, settings: &AppSettings) -> Result
         ("merge_on_confirm", settings.merge_on_confirm.to_string()),
         ("codex_model", settings.codex_model.clone()),
         ("codex_effort", settings.codex_effort.clone()),
+        ("default_agent", settings.default_agent.clone()),
+        ("claude_bin", settings.claude_bin.clone()),
+        ("claude_model", settings.claude_model.clone()),
+        ("opencode_bin", settings.opencode_bin.clone()),
+        ("opencode_model", settings.opencode_model.clone()),
     ] {
         tx.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -261,16 +312,34 @@ fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         branch_name: row.get(8)?,
         agent_thread_id: row.get(9)?,
         diff: row.get(10)?,
-        created_at: row.get(11)?,
-        updated_at: row.get(12)?,
+        agent_id: row.get(11)?,
+        agent_model: row.get(12)?,
+        agent_effort: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
     })
 }
 
 /// SELECT clause that matches `row_to_task`'s column indices.
 const TASK_SELECT: &str = "SELECT id, project_id, title, prompt, file_refs, status,
             base_ref, worktree_path, branch_name, agent_thread_id,
-            diff, created_at, updated_at
+            diff, agent_id, agent_model, agent_effort, created_at, updated_at
      FROM task";
+
+pub fn apply_generated_naming(
+    conn: &Connection,
+    task_id: &str,
+    expected_current_title: &str,
+    new_title: &str,
+    branch_name: &str,
+    now: &str,
+) -> Result<usize, AppError> {
+    Ok(conn.execute(
+        "UPDATE task SET title = ?1, branch_name = ?2, updated_at = ?3
+         WHERE id = ?4 AND title = ?5 AND status = 'draft'",
+        params![new_title, branch_name, now, task_id, expected_current_title],
+    )?)
+}
 
 pub fn insert_task(conn: &Connection, task: &Task) -> Result<(), AppError> {
     let file_refs_json = serde_json::to_string(&task.file_refs)
@@ -278,8 +347,8 @@ pub fn insert_task(conn: &Connection, task: &Task) -> Result<(), AppError> {
     conn.execute(
         "INSERT INTO task (id, project_id, title, prompt, file_refs, status,
                            base_ref, worktree_path, branch_name, agent_thread_id,
-                           diff, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                            diff, agent_id, agent_model, agent_effort, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             task.id,
             task.project_id,
@@ -292,6 +361,9 @@ pub fn insert_task(conn: &Connection, task: &Task) -> Result<(), AppError> {
             task.branch_name,
             task.agent_thread_id,
             task.diff,
+            task.agent_id,
+            task.agent_model,
+            task.agent_effort,
             task.created_at,
             task.updated_at,
         ],
@@ -312,11 +384,26 @@ pub fn insert_turn(
     status: &str,
     log_path: &str,
     started_at: &str,
+    agent_id: Option<&str>,
+    agent_model: Option<&str>,
+    agent_effort: Option<&str>,
 ) -> Result<(), AppError> {
     conn.execute(
-        "INSERT INTO turn (id, task_id, kind, prompt, status, log_path, started_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![id, task_id, kind, prompt, status, log_path, started_at],
+        "INSERT INTO turn (id, task_id, kind, prompt, status, log_path, started_at,
+                           agent_id, agent_model, agent_effort)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            id,
+            task_id,
+            kind,
+            prompt,
+            status,
+            log_path,
+            started_at,
+            agent_id,
+            agent_model,
+            agent_effort
+        ],
     )?;
     Ok(())
 }
@@ -355,6 +442,34 @@ pub fn set_task_thread_id(
         params![thread_id, now, task_id],
     )?;
     Ok(())
+}
+
+pub fn set_task_agent(
+    conn: &Connection,
+    task_id: &str,
+    agent_id: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE task SET agent_id = ?1, agent_model = ?2, agent_effort = ?3 WHERE id = ?4",
+        params![agent_id, model, effort, task_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_turn_thread_id(
+    conn: &Connection,
+    task_id: &str,
+    turn_id: &str,
+    thread_id: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    conn.execute(
+        "UPDATE turn SET agent_thread_id = ?1 WHERE id = ?2 AND task_id = ?3",
+        params![thread_id, turn_id, task_id],
+    )?;
+    set_task_thread_id(conn, task_id, thread_id, now)
 }
 
 pub fn finish_turn(
@@ -402,10 +517,13 @@ pub fn begin_follow_up(
     prompt: &str,
     log_path: &str,
     now: &str,
+    agent_id: Option<&str>,
+    agent_model: Option<&str>,
+    agent_effort: Option<&str>,
 ) -> Result<(), AppError> {
     let changed = conn.execute(
         "UPDATE task SET status = 'running', updated_at = ?1
-         WHERE id = ?2 AND status IN ('awaiting_review', 'changes_requested')",
+         WHERE id = ?2 AND status IN ('awaiting_review', 'changes_requested', 'ready')",
         params![now, task_id],
     )?;
     if changed == 0 {
@@ -423,6 +541,9 @@ pub fn begin_follow_up(
         "running",
         log_path,
         now,
+        agent_id,
+        agent_model,
+        agent_effort,
     ) {
         let _ = conn.execute(
             "UPDATE task SET status = 'changes_requested', updated_at = ?1 WHERE id = ?2",
@@ -431,6 +552,90 @@ pub fn begin_follow_up(
         return Err(error);
     }
     Ok(())
+}
+
+pub fn submit_review(
+    conn: &Connection,
+    task_id: &str,
+    turn_id: &str,
+    prompt: &str,
+    log_path: &str,
+    now: &str,
+    agent_id: Option<&str>,
+    agent_model: Option<&str>,
+    agent_effort: Option<&str>,
+) -> Result<(), AppError> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let changed = conn.execute(
+            "UPDATE task SET status = 'ready', updated_at = ?1 WHERE id = ?2 AND status IN ('awaiting_review', 'changes_requested')",
+            params![now, task_id],
+        )?;
+        if changed == 0 {
+            return Err(AppError::InvalidOperation(
+                "Task is not open for review".into(),
+            ));
+        }
+        insert_turn(
+            conn,
+            turn_id,
+            task_id,
+            "follow_up",
+            prompt,
+            "pending",
+            log_path,
+            now,
+            agent_id,
+            agent_model,
+            agent_effort,
+        )
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn activate_pending_turn(
+    conn: &Connection,
+    task_id: &str,
+    turn_id: &str,
+    now: &str,
+) -> Result<(), AppError> {
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| {
+        let turn_changed = conn.execute("UPDATE turn SET status = 'running' WHERE id = ?1 AND task_id = ?2 AND status = 'pending'", params![turn_id, task_id])?;
+        let task_changed = conn.execute("UPDATE task SET status = 'running', updated_at = ?1 WHERE id = ?2 AND status = 'ready'", params![now, task_id])?;
+        if turn_changed == 0 || task_changed == 0 {
+            return Err(AppError::InvalidOperation(
+                "Pending follow-up is no longer ready to start".into(),
+            ));
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => conn.execute_batch("COMMIT")?,
+        Err(error) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+pub fn select_pending_turn(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<crate::models::TaskTurn>, AppError> {
+    conn.query_row(
+        "SELECT id, task_id, kind, prompt, status, log_path, started_at, ended_at, agent_id, agent_model, agent_effort, agent_thread_id FROM turn WHERE task_id = ?1 AND status = 'pending' ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        params![task_id],
+        |row| Ok(crate::models::TaskTurn { id: row.get(0)?, task_id: row.get(1)?, kind: row.get(2)?, prompt: row.get(3)?, status: row.get(4)?, log_path: row.get(5)?, started_at: row.get(6)?, ended_at: row.get(7)?, agent_id: row.get(8)?, agent_model: row.get(9)?, agent_effort: row.get(10)?, agent_thread_id: row.get(11)? }),
+    ).optional().map_err(AppError::from)
 }
 
 pub fn fail_follow_up_start(
@@ -483,20 +688,39 @@ pub fn select_latest_turn_id(conn: &Connection, task_id: &str) -> Result<Option<
     .map_err(AppError::from)
 }
 
+pub fn select_latest_agent_turn(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<(String, String, Option<String>)>, AppError> {
+    conn.query_row(
+        "SELECT agent_id, id, agent_thread_id FROM turn
+         WHERE task_id = ?1 ORDER BY started_at DESC, rowid DESC LIMIT 1",
+        params![task_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(AppError::from)
+}
+
 pub fn insert_review_comment(conn: &Connection, comment: &ReviewComment) -> Result<(), AppError> {
     conn.execute(
         "INSERT INTO review_comment
-         (id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, task_id, turn_id, file_path, line_number, line_end_number, side, body, resolved,
+          assigned_agent_id, assigned_model, assigned_effort, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             comment.id,
             comment.task_id,
             comment.turn_id,
             comment.file_path,
             comment.line_number,
+            comment.line_end_number,
             comment.side,
             comment.body,
             i64::from(comment.resolved),
+            comment.assigned_agent_id,
+            comment.assigned_model,
+            comment.assigned_effort,
             comment.created_at,
         ],
     )?;
@@ -508,7 +732,8 @@ pub fn select_review_comments(
     task_id: &str,
 ) -> Result<Vec<ReviewComment>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+        "SELECT id, task_id, turn_id, file_path, line_number, line_end_number, side, body, resolved,
+                assigned_agent_id, assigned_model, assigned_effort, created_at
          FROM review_comment WHERE task_id = ?1 ORDER BY created_at ASC, rowid ASC",
     )?;
     let comments = stmt
@@ -522,7 +747,8 @@ pub fn select_unresolved_review_comments(
     task_id: &str,
 ) -> Result<Vec<ReviewComment>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+        "SELECT id, task_id, turn_id, file_path, line_number, line_end_number, side, body, resolved,
+                assigned_agent_id, assigned_model, assigned_effort, created_at
          FROM review_comment
          WHERE task_id = ?1 AND resolved = 0
          ORDER BY created_at ASC, rowid ASC",
@@ -569,7 +795,34 @@ pub fn resolve_review_comment(
         return Ok(None);
     }
     conn.query_row(
-        "SELECT id, task_id, turn_id, file_path, line_number, side, body, resolved, created_at
+        "SELECT id, task_id, turn_id, file_path, line_number, line_end_number, side, body, resolved,
+                assigned_agent_id, assigned_model, assigned_effort, created_at
+         FROM review_comment WHERE id = ?1",
+        params![comment_id],
+        row_to_review_comment,
+    )
+    .optional()
+    .map_err(AppError::from)
+}
+
+pub fn assign_review_comment(
+    conn: &Connection,
+    comment_id: &str,
+    agent_id: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Option<ReviewComment>, AppError> {
+    let changed = conn.execute(
+        "UPDATE review_comment SET assigned_agent_id = ?1, assigned_model = ?2,
+         assigned_effort = ?3 WHERE id = ?4",
+        params![agent_id, model, effort, comment_id],
+    )?;
+    if changed == 0 {
+        return Ok(None);
+    }
+    conn.query_row(
+        "SELECT id, task_id, turn_id, file_path, line_number, line_end_number, side, body, resolved,
+                assigned_agent_id, assigned_model, assigned_effort, created_at
          FROM review_comment WHERE id = ?1",
         params![comment_id],
         row_to_review_comment,
@@ -585,10 +838,14 @@ fn row_to_review_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComm
         turn_id: row.get(2)?,
         file_path: row.get(3)?,
         line_number: row.get(4)?,
-        side: row.get(5)?,
-        body: row.get(6)?,
-        resolved: row.get::<_, i64>(7)? != 0,
-        created_at: row.get(8)?,
+        line_end_number: row.get(5)?,
+        side: row.get(6)?,
+        body: row.get(7)?,
+        resolved: row.get::<_, i64>(8)? != 0,
+        assigned_agent_id: row.get(9)?,
+        assigned_model: row.get(10)?,
+        assigned_effort: row.get(11)?,
+        created_at: row.get(12)?,
     })
 }
 
@@ -613,7 +870,8 @@ pub fn select_turns_for_task(
     task_id: &str,
 ) -> Result<Vec<crate::models::TaskTurn>, AppError> {
     let mut stmt = conn.prepare(
-        "SELECT id, task_id, kind, prompt, status, log_path, started_at, ended_at
+        "SELECT id, task_id, kind, prompt, status, log_path, started_at, ended_at,
+                agent_id, agent_model, agent_effort, agent_thread_id
          FROM turn WHERE task_id = ?1 ORDER BY started_at ASC, rowid ASC",
     )?;
     let turns = stmt
@@ -627,6 +885,10 @@ pub fn select_turns_for_task(
                 log_path: row.get(5)?,
                 started_at: row.get(6)?,
                 ended_at: row.get(7)?,
+                agent_id: row.get(8)?,
+                agent_model: row.get(9)?,
+                agent_effort: row.get(10)?,
+                agent_thread_id: row.get(11)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -721,6 +983,9 @@ mod tests {
             worktree_path: None,
             branch_name: None,
             agent_thread_id: None,
+            agent_id: None,
+            agent_model: None,
+            agent_effort: None,
             diff: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
@@ -917,6 +1182,9 @@ mod tests {
             "completed",
             "/tmp/log",
             "2024-01-01T00:00:00Z",
+            Some("codex"),
+            Some("o4-mini"),
+            Some("medium"),
         )
         .unwrap();
         let comment = ReviewComment {
@@ -925,9 +1193,13 @@ mod tests {
             turn_id: "turn-1".to_string(),
             file_path: "src/main.rs".to_string(),
             line_number: Some(12),
+            line_end_number: None,
             side: Some("new".to_string()),
             body: "Handle the error here".to_string(),
             resolved: false,
+            assigned_agent_id: None,
+            assigned_model: None,
+            assigned_effort: None,
             created_at: "2024-01-01T00:01:00Z".to_string(),
         };
         insert_review_comment(&conn, &comment).unwrap();
@@ -960,6 +1232,9 @@ mod tests {
             "completed",
             "/tmp/initial.log",
             "2024-01-01T00:00:00Z",
+            Some("codex"),
+            Some("o4-mini"),
+            Some("medium"),
         )
         .unwrap();
         for id in ["c1", "c2"] {
@@ -971,9 +1246,13 @@ mod tests {
                     turn_id: "turn-1".to_string(),
                     file_path: "src/main.rs".to_string(),
                     line_number: None,
+                    line_end_number: None,
                     side: None,
                     body: format!("feedback {id}"),
                     resolved: false,
+                    assigned_agent_id: None,
+                    assigned_model: None,
+                    assigned_effort: None,
                     created_at: format!("2024-01-01T00:01:0{}Z", &id[1..]),
                 },
             )
@@ -987,6 +1266,9 @@ mod tests {
             "follow-up prompt",
             "/tmp/follow-up.log",
             "2024-01-01T00:02:00Z",
+            Some("codex"),
+            Some("o4-mini"),
+            Some("medium"),
         )
         .unwrap();
         assert_eq!(select_task(&conn, "t1").unwrap().unwrap().status, "running");

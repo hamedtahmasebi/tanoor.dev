@@ -9,6 +9,11 @@ const DEFAULTS: UpdateSettingsInput = {
   mergeOnConfirm: false,
   codexModel: "o4-mini",
   codexEffort: "medium",
+  defaultAgent: "codex",
+  claudeBin: "claude",
+  claudeModel: "sonnet",
+  opencodeBin: "opencode",
+  opencodeModel: "anthropic/claude-sonnet-4-5",
 };
 
 function HealthBadge({ ready, label }: { ready: boolean; label: string }) {
@@ -39,10 +44,17 @@ export function SettingsDialog() {
       mergeOnConfirm: settings.mergeOnConfirm,
       codexModel: settings.codexModel,
       codexEffort: settings.codexEffort,
+      defaultAgent: settings.defaultAgent,
+      claudeBin: settings.claudeBin,
+      claudeModel: settings.claudeModel,
+      opencodeBin: settings.opencodeBin,
+      opencodeModel: settings.opencodeModel,
     });
   }, [settings]);
 
   const valid = draft.codexBin.trim().length > 0
+    && draft.claudeBin.trim().length > 0
+    && draft.opencodeBin.trim().length > 0
     && draft.gitBin.trim().length > 0
     && Number.isInteger(draft.maxConcurrentTasks)
     && draft.maxConcurrentTasks >= 1
@@ -73,6 +85,8 @@ export function SettingsDialog() {
                 <code>{systemHealth?.codex.version ?? systemHealth?.codex.detail ?? "Not checked"}</code>
               </div>
               <div className="settings-auth-row"><span>Authentication</span><strong className={`auth-${systemHealth?.codex.authStatus ?? "unknown"}`}>{(systemHealth?.codex.authStatus ?? "unknown").replace("_", " ")}</strong><small>{systemHealth?.codex.authDetail ?? "No authentication status available."}</small></div>
+              <label className="settings-field"><span>Claude Code binary</span><input value={draft.claudeBin} spellCheck={false} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, claudeBin: event.target.value })); }} /><small>Executable name on PATH or an absolute file path.</small></label>
+              <label className="settings-field"><span>opencode binary</span><input value={draft.opencodeBin} spellCheck={false} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, opencodeBin: event.target.value })); }} /><small>Executable name on PATH or an absolute file path.</small></label>
               <label className="settings-field"><span>Git binary</span><input value={draft.gitBin} spellCheck={false} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, gitBin: event.target.value })); }} /><small>Used for repository checks, worktrees, diffs, commits, and merges.</small></label>
               <div className="settings-health-row">
                 <HealthBadge ready={systemHealth?.git.binaryFound ?? false} label={systemHealth?.git.binaryFound ? "Git found" : "Git unavailable"} />
@@ -84,6 +98,7 @@ export function SettingsDialog() {
               <div className="settings-section-heading"><div><h2>Execution</h2><p>Active tasks are never cancelled when these values change.</p></div></div>
               <label className="settings-field settings-number"><span>Maximum concurrent tasks</span><input type="number" min={1} max={16} step={1} value={draft.maxConcurrentTasks} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, maxConcurrentTasks: Number(event.target.value) })); }} /><small>Between 1 and 16. A lower limit applies as soon as running tasks finish.</small></label>
               <label className="settings-toggle"><input type="checkbox" checked={draft.mergeOnConfirm} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, mergeOnConfirm: event.target.checked })); }} /><span><strong>Merge on confirm by default</strong><small>The approval dialog can still override this for each task.</small></span></label>
+              <label className="settings-field"><span>Default coding agent</span><select value={draft.defaultAgent} onChange={(event) => { setSaved(false); setDraft((value) => ({ ...value, defaultAgent: event.target.value })); }}><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="opencode">opencode</option></select><small>Used when a task or follow-up does not explicitly select an agent.</small></label>
               <div className="settings-readonly"><div><span>Sandbox policy</span><code>workspace-write</code></div><small>Fixed for Tanoor v1. Tasks can write inside their isolated worktree; this policy cannot be weakened here.</small></div>
             </section>
           </div>

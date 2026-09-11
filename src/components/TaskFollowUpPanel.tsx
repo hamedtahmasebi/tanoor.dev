@@ -1,4 +1,4 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, useState } from "react";
 import { useStore } from "../store";
 import type { Task, TaskStatus, TaskTurn, TaskEvent } from "../types";
 
@@ -11,6 +11,7 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   running: "Running",
   awaiting_review: "Pending review",
   changes_requested: "Changes requested",
+  ready: "Ready to run",
   approved: "Finished",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -29,7 +30,8 @@ function stepIndex(status: TaskStatus): number {
     case "draft": return 0;
     case "running": return 1;
     case "awaiting_review":
-    case "changes_requested": return 2;
+    case "changes_requested":
+    case "ready": return 2;
     case "approved": return 3;
     case "failed":
     case "cancelled": return -1; // error / terminal
@@ -39,49 +41,77 @@ function stepIndex(status: TaskStatus): number {
 
 function stepLabel(s: TaskStatus): string {
   if (s === "awaiting_review" || s === "changes_requested") return "Pending review";
+  if (s === "ready") return "Ready to run";
   return STATUS_LABELS[s] ?? s;
 }
 
-/** Parse a JSONL log line and pull out a readable text fragment. */
-function summariseLine(raw: string): string | null {
-  try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
-    const type = String(obj["type"] ?? "");
-
-    // agent_message / assistant messages carry the actual text
-    const msg = obj["message"] ?? obj["msg"] ?? obj["content"];
-    if (typeof msg === "string" && msg.trim()) {
-      return `[${type}] ${msg.trim()}`;
-    }
-
-    // item events may have nested content
-    if (obj["item"]) {
-      const item = obj["item"] as Record<string, unknown>;
-      const content = item["content"] ?? item["text"] ?? item["output"];
-      if (typeof content === "string" && content.trim()) {
-        return `[${type}] ${content.trim().slice(0, 200)}`;
-      }
-    }
-
-    // Turn lifecycle events
-    if (type === "turn.completed") return "✓ Turn completed";
-    if (type === "turn.failed") {
-      const err = obj["error"];
-      return `✗ Turn failed${typeof err === "string" ? `: ${err}` : ""}`;
-    }
-    if (type === "thread.started") return "↻ Agent thread started";
-    if (type === "agent.reasoning" || type === "agent.thinking") {
-      const txt = obj["text"] ?? obj["reasoning"];
-      if (typeof txt === "string") return `… ${txt.trim().slice(0, 120)}`;
-    }
-
-    // Fallback: show the type
-    return type ? `[${type}]` : null;
-  } catch {
-    // Plain text line (e.g. stderr)
-    const trimmed = raw.trim();
-    return trimmed.length > 0 ? trimmed : null;
+const firstString = (...values: unknown[]): string | null => {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
   }
+  return null;
+};
+
+/** A short, single-line preview extracted from well-known text-bearing fields. */
+function extractHeadline(record: Record<string, unknown>): string | null {
+  const direct = firstString(
+    record["message"], record["msg"], record["content"], record["text"],
+    record["reasoning"], record["result"], record["error"], record["delta"],
+  );
+  if (direct) return direct;
+
+  const part = record["part"];
+  if (part && typeof part === "object") {
+    const p = part as Record<string, unknown>;
+    const tool = firstString(p["tool"], p["name"]);
+    const text = firstString(p["text"], p["output"], p["reason"]);
+    const combined = [tool, text].filter(Boolean).join(" → ");
+    if (combined) return combined;
+  }
+
+  const item = record["item"];
+  if (item && typeof item === "object") {
+    const it = item as Record<string, unknown>;
+    const detail = firstString(it["content"], it["text"], it["output"], it["name"]);
+    if (detail) return detail;
+  }
+
+  return null;
+}
+
+/**
+ * Format a JSONL log line for display. Nothing is truncated or dropped: a
+ * readable headline is shown, and the full payload is appended as pretty JSON
+ * so every field is available for debugging.
+ */
+function summariseLine(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // Plain text line (e.g. stderr) — show it verbatim.
+    return trimmed;
+  }
+  if (!parsed || typeof parsed !== "object") return trimmed;
+
+  const record = parsed as Record<string, unknown>;
+  const type = typeof record["type"] === "string" ? (record["type"] as string) : "event";
+  const headlineText = extractHeadline(record)?.replace(/\s+/g, " ").trim();
+  const headline = `[${type}]${headlineText ? ` ${headlineText}` : ""}`;
+
+  const otherKeys = Object.keys(record).filter((key) => key !== "type");
+  if (otherKeys.length === 0) return headline;
+
+  let detail: string;
+  try {
+    detail = JSON.stringify(record, null, 2);
+  } catch {
+    detail = trimmed;
+  }
+  return `${headline}\n${detail}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -101,7 +131,7 @@ function StatusStepper({ status }: StatusStepperProps) {
       {STATUS_STEPS.map((step, i) => {
         const completed = !isError && i < current;
         const active = !isError && i === current;
-        const label = stepLabel(step);
+        const label = i === current ? stepLabel(status) : stepLabel(step);
         return (
           <div key={step} className="followup-step">
             <div className={[
@@ -178,9 +208,10 @@ function OutputBlock({ turn, savedLines, liveEvents, isActive }: OutputBlockProp
     }
   }, [combinedLines.length, isActive]);
 
-  const kindLabel = turn.kind === "initial" ? "Initial run" : "Follow-up";
+  const kindLabel = `${turn.kind === "initial" ? "Initial run" : "Follow-up"}${turn.agentId ? ` · ${turn.agentId}` : ""}`;
   const statusClass = turn.status === "completed" ? "turn-status--done"
     : turn.status === "failed" || turn.status === "cancelled" ? "turn-status--error"
+    : turn.status === "pending" ? "turn-status--pending"
     : "turn-status--running";
 
   return (
@@ -219,18 +250,24 @@ function OutputBlock({ turn, savedLines, liveEvents, isActive }: OutputBlockProp
 interface Props {
   task: Task;
   onRunTask: () => void;
+  onRetryTask: () => void;
   onCancelTask: () => void;
   onOpenReview: () => void;
 }
 
-export function TaskFollowUpPanel({ task, onRunTask, onCancelTask, onOpenReview }: Props) {
+export function TaskFollowUpPanel({ task, onRunTask, onRetryTask, onCancelTask, onOpenReview }: Props) {
   const {
     taskTurns,
     taskOutput,
     taskEvents,
     isLoadingTaskOutput,
     loadTaskOutput,
+    editors,
+    openInEditor,
   } = useStore();
+  const [showEditorDropdown, setShowEditorDropdown] = useState(false);
+  const [focusedEditor, setFocusedEditor] = useState(0);
+  const editorListRef = useRef<HTMLDivElement>(null);
 
   const turns: TaskTurn[] = taskTurns[task.id] ?? [];
   const liveEvents = taskEvents[task.id] ?? [];
@@ -275,6 +312,10 @@ export function TaskFollowUpPanel({ task, onRunTask, onCancelTask, onOpenReview 
         logPath: "",
         startedAt: new Date().toISOString(),
         endedAt: null,
+        agentId: task.agentId,
+        agentModel: task.agentModel,
+        agentEffort: task.agentEffort,
+        agentThreadId: task.agentThreadId,
       };
       return [...turns, fake];
     }
@@ -282,8 +323,19 @@ export function TaskFollowUpPanel({ task, onRunTask, onCancelTask, onOpenReview 
   }, [turns, liveTurnId, task.id]);
 
   const isRunning = task.status === "running";
-  const canRun = task.status === "draft";
+  const canRun = task.status === "draft" || task.status === "ready";
+  const canRetry = task.status === "failed" || task.status === "cancelled";
   const needsReview = task.status === "awaiting_review" || task.status === "changes_requested";
+
+  const selectEditor = (editorId: string) => {
+    setShowEditorDropdown(false);
+    void openInEditor(task.id, editorId).catch(() => undefined);
+  };
+  const moveEditorFocus = (direction: 1 | -1) => {
+    const next = (focusedEditor + direction + editors.length) % editors.length;
+    setFocusedEditor(next);
+    requestAnimationFrame(() => editorListRef.current?.querySelectorAll<HTMLButtonElement>("button")[next]?.focus());
+  };
 
   return (
     <div className="followup-panel">
@@ -309,9 +361,22 @@ export function TaskFollowUpPanel({ task, onRunTask, onCancelTask, onOpenReview 
           )}
           {canRun && (
             <button className="quiet-button" type="button" onClick={onRunTask}>
-              Run task
+              {task.status === "ready" ? "Start follow-up" : "Run task"}
             </button>
           )}
+          {canRetry && (
+            <button className="quiet-button" type="button" onClick={onRetryTask} title="Reset and run this task again">
+              Retry task
+            </button>
+          )}
+          <div className="editor-launcher">
+            <button className="quiet-button" type="button" disabled={!task.worktreePath || editors.length === 0} title={!task.worktreePath ? "This task has no worktree yet — run it first" : editors.length === 0 ? "No supported editor found" : "Open worktree in editor"} aria-haspopup={editors.length > 1 ? "listbox" : undefined} aria-expanded={showEditorDropdown} onClick={() => { if (editors.length === 1) selectEditor(editors[0].id); else if (editors.length > 1) { setFocusedEditor(0); setShowEditorDropdown((value) => !value); requestAnimationFrame(() => editorListRef.current?.querySelector<HTMLButtonElement>("button")?.focus()); } }}>
+              Open in editor
+            </button>
+            {showEditorDropdown && editors.length > 1 && <div ref={editorListRef} className="project-dropdown editor-dropdown" role="listbox" aria-label="Choose editor" onKeyDown={(event) => { if (event.key === "ArrowDown") { event.preventDefault(); moveEditorFocus(1); } else if (event.key === "ArrowUp") { event.preventDefault(); moveEditorFocus(-1); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectEditor(editors[focusedEditor].id); } else if (event.key === "Escape") { event.preventDefault(); setShowEditorDropdown(false); } }}>
+              {editors.map((editor, index) => <button key={editor.id} className="project-dropdown-item" type="button" role="option" aria-selected={index === focusedEditor} tabIndex={index === focusedEditor ? 0 : -1} onFocus={() => setFocusedEditor(index)} onClick={() => selectEditor(editor.id)}><span>{editor.label}</span><small>{editor.command}</small></button>)}
+            </div>}
+          </div>
           {needsReview && (
             <button className="quiet-button" type="button" onClick={onOpenReview}>
               Review changes

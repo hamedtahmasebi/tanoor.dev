@@ -4,7 +4,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { useStore } from "./store";
 import { TaskCard } from "./components/TaskCard";
 import { NewTaskDialog } from "./components/NewTaskDialog";
-import { DiffReviewDialog } from "./components/DiffReview";
+import { ReviewScreen } from "./components/ReviewScreen";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { TaskFollowUpPanel } from "./components/TaskFollowUpPanel";
 import type { CreateTaskInput, TaskEvent } from "./types";
@@ -39,10 +39,11 @@ function App() {
     createTask,
     deleteTask,
     runTask,
+    retryTask,
     cancelTask,
     appendTaskEvent,
     taskEvents,
-    reviewModal,
+    reviewTaskId,
     openReview,
     closeReview,
     clearError,
@@ -136,6 +137,10 @@ function App() {
     if (selectedTask) await runTask(selectedTask.id);
   };
 
+  const handleRetryTask = async () => {
+    if (selectedTask) await retryTask(selectedTask.id);
+  };
+
   const handleCancelTask = async () => {
     if (selectedTask) await cancelTask(selectedTask.id);
   };
@@ -210,10 +215,11 @@ function App() {
         {!currentProject ? (
           <section className="welcome-pane"><div className="welcome-symbol">⌘</div><h1>Open a project to start</h1><p>Tanoor keeps your tasks close to the code. Pick a git repository, then describe the next change in the editor.</p><button className="quiet-button" type="button" onClick={handleAddProject}>Open git project <span>⌘ O</span></button></section>
         ) : selectedTask ? (
-          <section className="task-detail-pane">
+          reviewTaskId === selectedTask.id ? <ReviewScreen task={selectedTask} /> : <section className="task-detail-pane">
             <TaskFollowUpPanel
               task={selectedTask}
               onRunTask={() => void handleRunTask()}
+              onRetryTask={() => void handleRetryTask()}
               onCancelTask={() => void handleCancelTask()}
               onOpenReview={() => void openReview(selectedTask.id)}
             />
@@ -255,7 +261,6 @@ function App() {
         );
       })()}
 
-      {reviewModal && (() => { const task = tasks.find((item) => item.id === reviewModal.taskId); return task ? <DiffReviewDialog task={task} /> : null; })()}
 
       {isSettingsOpen && <SettingsDialog />}
 

@@ -13,14 +13,13 @@ import type {
   SystemHealthStatus,
   UpdateSettingsInput,
   UpdateTaskInput,
+  AgentSelection,
+  EditorInfo,
+  ProjectEntry,
 } from "./types";
 
 export type ReviewStep = "review" | "confirm" | "request_changes";
 
-export interface ReviewModalState {
-  taskId: string;
-  step: ReviewStep;
-}
 
 // ---------------------------------------------------------------------------
 // Store shape
@@ -35,11 +34,14 @@ interface AppState {
   taskTurns: Record<string, TaskTurn[]>;
   taskOutput: Record<string, string[]>; // turnId -> log lines
   reviewComments: Record<string, ReviewComment[]>;
-  reviewModal: ReviewModalState | null;
+  reviewTaskId: string | null;
+  reviewStep: ReviewStep;
+  editors: EditorInfo[];
   settings: AppSettings | null;
   systemHealth: SystemHealthStatus | null;
   isSettingsOpen: boolean;
   modelCatalog: AgentModelCatalog | null;
+  agentCatalogs: AgentModelCatalog[];
 
   // --- Loading flags ---
   isLoadingProjects: boolean;
@@ -58,10 +60,15 @@ interface AppState {
   initApp: () => Promise<void>;
   addProject: (rootPath: string) => Promise<void>;
   switchProject: (projectId: string) => Promise<void>;
+  loadProjectDir: (projectId: string, path: string | null) => Promise<ProjectEntry[]>;
+  searchProjectFiles: (projectId: string, query: string) => Promise<string[]>;
   createTask: (projectId: string, input: CreateTaskInput) => Promise<Task>;
   deleteTask: (taskId: string) => Promise<void>;
   updateTask: (taskId: string, input: UpdateTaskInput) => Promise<void>;
-  runTask: (taskId: string) => Promise<void>;
+  renameTask: (taskId: string, title: string) => Promise<void>;
+  openInEditor: (taskId: string, editorId: string) => Promise<void>;
+  runTask: (taskId: string, selection?: AgentSelection) => Promise<void>;
+  retryTask: (taskId: string, selection?: AgentSelection) => Promise<void>;
   cancelTask: (taskId: string) => Promise<void>;
   appendTaskEvent: (event: TaskEvent) => void;
   loadTaskOutput: (taskId: string) => Promise<void>;
@@ -71,14 +78,15 @@ interface AppState {
   loadReviewComments: (taskId: string) => Promise<void>;
   addReviewComment: (taskId: string, input: AddReviewCommentInput) => Promise<void>;
   resolveReviewComment: (taskId: string, commentId: string) => Promise<void>;
-  requestChanges: (taskId: string, reviewerNote: string) => Promise<void>;
+  assignReviewComment: (taskId: string, commentId: string, agentId: string | null, model: string | null, effort: string | null) => Promise<void>;
+  submitReview: (taskId: string, reviewerNote: string, selection?: AgentSelection) => Promise<void>;
   confirmTask: (taskId: string, merge: boolean) => Promise<void>;
   openSettings: () => void;
   closeSettings: () => void;
   saveSettings: (input: UpdateSettingsInput) => Promise<void>;
   /** Loads the model catalog from the backend. Call before opening the inline picker. */
   openModelDialog: () => Promise<void>;
-  saveModelSelection: (modelId: string, effortId: string) => Promise<void>;
+  saveModelSelection: (agentId: string, modelId: string, effortId: string) => Promise<void>;
   refreshSystemHealth: () => Promise<void>;
   clearError: () => void;
 }
@@ -95,11 +103,14 @@ export const useStore = create<AppState>((set, get) => ({
   taskTurns: {},
   taskOutput: {},
   reviewComments: {},
-  reviewModal: null,
+  reviewTaskId: null,
+  reviewStep: "review",
+  editors: [],
   settings: null,
   systemHealth: null,
   isSettingsOpen: false,
   modelCatalog: null,
+  agentCatalogs: [],
   isLoadingProjects: false,
   isLoadingTasks: false,
   isLoadingReview: false,
@@ -120,6 +131,7 @@ export const useStore = create<AppState>((set, get) => ({
       const currentProjectId = projects.length > 0 ? projects[0].id : null;
       set({ projects, settings, currentProjectId, isLoadingProjects: false, isLoadingSettings: false });
       void get().refreshSystemHealth();
+      void api.listEditors().then((editors) => set({ editors })).catch(() => undefined);
       if (currentProjectId) {
         await get().switchProject(currentProjectId);
       }
@@ -150,6 +162,24 @@ export const useStore = create<AppState>((set, get) => ({
       set({ tasks, isLoadingTasks: false });
     } catch (e) {
       set({ error: String(e), isLoadingTasks: false });
+    }
+  },
+
+  loadProjectDir: async (projectId: string, path: string | null) => {
+    try {
+      return await api.listProjectDir(projectId, path);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  searchProjectFiles: async (projectId: string, query: string) => {
+    try {
+      return await api.searchProjectFiles(projectId, query);
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
     }
   },
 
@@ -189,10 +219,43 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  runTask: async (taskId: string) => {
+  renameTask: async (taskId: string, title: string) => {
     set({ error: null });
     try {
-      const task = await api.runTask(taskId);
+      const task = await api.renameTask(taskId, title);
+      set((s) => ({ tasks: s.tasks.map((item) => item.id === task.id ? task : item) }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  openInEditor: async (taskId: string, editorId: string) => {
+    set({ error: null });
+    try {
+      const task = await api.openWorktreeInEditor(taskId, editorId);
+      set((s) => ({ tasks: s.tasks.map((item) => item.id === task.id ? task : item) }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  runTask: async (taskId: string, selection?: AgentSelection) => {
+    set({ error: null });
+    try {
+      const task = await api.runTask(taskId, selection);
+      set((s) => ({ tasks: s.tasks.map((item) => item.id === task.id ? task : item) }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  retryTask: async (taskId: string, selection?: AgentSelection) => {
+    set({ error: null });
+    try {
+      const task = await api.retryTask(taskId, selection);
       set((s) => ({ tasks: s.tasks.map((item) => item.id === task.id ? task : item) }));
     } catch (e) {
       set({ error: String(e) });
@@ -216,6 +279,17 @@ export const useStore = create<AppState>((set, get) => ({
 
   appendTaskEvent: (event: TaskEvent) => {
     set((s) => {
+      if (event.eventType === "forge.task.named") {
+        const title = typeof event.raw.title === "string" ? event.raw.title : null;
+        const branchName = typeof event.raw.branchName === "string" ? event.raw.branchName : null;
+        return {
+          tasks: s.tasks.map((task) => task.id === event.taskId ? {
+            ...task,
+            ...(title ? { title } : {}),
+            ...(branchName ? { branchName } : {}),
+          } : task),
+        };
+      }
       const previous = s.taskEvents[event.taskId] ?? [];
       const next = [...previous, event].slice(-500);
       const tasks = event.status
@@ -255,7 +329,8 @@ export const useStore = create<AppState>((set, get) => ({
   },
 
   openReview: async (taskId: string) => {
-    set({ reviewModal: { taskId, step: "review" } });
+    set({ reviewTaskId: taskId, reviewStep: "review" });
+    await get().openModelDialog();
     try {
       await get().loadReviewComments(taskId);
     } catch {
@@ -265,13 +340,9 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  setReviewStep: (step: ReviewStep) => {
-    set((state) => state.reviewModal
-      ? { reviewModal: { ...state.reviewModal, step } }
-      : state);
-  },
+  setReviewStep: (step: ReviewStep) => set({ reviewStep: step }),
 
-  closeReview: () => set({ reviewModal: null }),
+  closeReview: () => set({ reviewTaskId: null }),
 
   loadReviewComments: async (taskId: string) => {
     set({ isLoadingReview: true, error: null });
@@ -320,18 +391,30 @@ export const useStore = create<AppState>((set, get) => ({
     }
   },
 
-  requestChanges: async (taskId: string, reviewerNote: string) => {
-    set({ isSubmittingReview: true, error: null });
+  assignReviewComment: async (taskId, commentId, agentId, model, effort) => {
+    set({ error: null });
     try {
-      const task = await api.requestChanges(taskId, reviewerNote);
+      const updated = await api.assignReviewComment(commentId, agentId, model, effort);
       set((state) => ({
-        tasks: state.tasks.map((item) => item.id === task.id ? task : item),
         reviewComments: {
           ...state.reviewComments,
           [taskId]: (state.reviewComments[taskId] ?? []).map((comment) =>
-            comment.resolved ? comment : { ...comment, resolved: true }),
+            comment.id === updated.id ? updated : comment),
         },
-        reviewModal: null,
+      }));
+    } catch (e) {
+      set({ error: String(e) });
+      throw e;
+    }
+  },
+
+  submitReview: async (taskId: string, reviewerNote: string, selection?: AgentSelection) => {
+    set({ isSubmittingReview: true, error: null });
+    try {
+      const task = await api.submitReview(taskId, reviewerNote, selection);
+      set((state) => ({
+        tasks: state.tasks.map((item) => item.id === task.id ? task : item),
+        reviewTaskId: null,
         isSubmittingReview: false,
       }));
     } catch (e) {
@@ -346,7 +429,7 @@ export const useStore = create<AppState>((set, get) => ({
       const task = await api.confirmTask(taskId, merge);
       set((state) => ({
         tasks: state.tasks.map((item) => item.id === task.id ? task : item),
-        reviewModal: null,
+        reviewTaskId: null,
         isSubmittingReview: false,
       }));
     } catch (e) {
@@ -365,23 +448,34 @@ export const useStore = create<AppState>((set, get) => ({
   openModelDialog: async () => {
     set({ error: null });
     try {
-      const modelCatalog = await api.getAgentModels();
-      set({ modelCatalog });
+      const agentCatalogs = await api.listAgentCatalogs();
+      const selectedAgent = get().settings?.defaultAgent ?? "codex";
+      set({
+        agentCatalogs,
+        modelCatalog: agentCatalogs.find((catalog) => catalog.agentId === selectedAgent)
+          ?? agentCatalogs[0]
+          ?? null,
+      });
     } catch (e) {
       set({ error: String(e) });
     }
   },
 
-  saveModelSelection: async (modelId: string, effortId: string) => {
+  saveModelSelection: async (agentId: string, modelId: string, effortId: string) => {
     const { settings } = get();
     if (!settings) return;
     try {
       const updated = await api.updateSettings({
         ...settings,
-        codexModel: modelId,
-        codexEffort: effortId,
+        ...(agentId === "codex" ? { codexModel: modelId, codexEffort: effortId } : {}),
+        ...(agentId === "claude" ? { claudeModel: modelId } : {}),
+        ...(agentId === "opencode" ? { opencodeModel: modelId } : {}),
+        defaultAgent: agentId,
       });
-      set({ settings: updated });
+      set((state) => ({
+        settings: updated,
+        modelCatalog: state.agentCatalogs.find((catalog) => catalog.agentId === agentId) ?? state.modelCatalog,
+      }));
     } catch (e) {
       set({ error: String(e) });
       throw e;

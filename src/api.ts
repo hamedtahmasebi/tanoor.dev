@@ -13,6 +13,9 @@ import type {
   TaskTurn,
   UpdateTaskInput,
   AgentModelCatalog,
+  AgentSelection,
+  EditorInfo,
+  ProjectEntry,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -32,13 +35,28 @@ type CommandContract = {
     args: undefined;
     result: Project[];
   };
+  list_project_dir: {
+    args: { projectId: string; path: string | null };
+    result: ProjectEntry[];
+  };
+  search_project_files: {
+    args: { projectId: string; query: string };
+    result: string[];
+  };
   create_task: {
     args: {
       projectId: string;
-      title: string;
+      title: string | null;
       prompt: string;
       fileRefs: string[];
+      agentId: string | null;
+      agentModel: string | null;
+      agentEffort: string | null;
     };
+    result: Task;
+  };
+  rename_task: {
+    args: { taskId: string; title: string };
     result: Task;
   };
   list_tasks: {
@@ -78,12 +96,20 @@ type CommandContract = {
     args: undefined;
     result: AgentModelCatalog;
   };
+  list_agent_catalogs: {
+    args: undefined;
+    result: AgentModelCatalog[];
+  };
   check_system_health: {
     args: undefined;
     result: SystemHealthStatus;
   };
   run_task: {
-    args: { taskId: string };
+    args: { taskId: string; agentId: string | null; model: string | null; effort: string | null };
+    result: Task;
+  };
+  retry_task: {
+    args: { taskId: string; agentId: string | null; model: string | null; effort: string | null };
     result: Task;
   };
   cancel_task: {
@@ -96,6 +122,7 @@ type CommandContract = {
       filePath: string;
       lineNumber: number | null;
       side: "old" | "new" | null;
+      lineEndNumber: number | null;
       body: string;
     };
     result: ReviewComment;
@@ -104,14 +131,29 @@ type CommandContract = {
     args: { commentId: string };
     result: ReviewComment;
   };
+  assign_review_comment: {
+    args: { commentId: string; agentId: string | null; model: string | null; effort: string | null };
+    result: ReviewComment;
+  };
   list_review_comments: {
     args: { taskId: string };
     result: ReviewComment[];
   };
-  request_changes: {
+  list_editors: {
+    args: undefined;
+    result: EditorInfo[];
+  };
+  open_worktree_in_editor: {
+    args: { taskId: string; editorId: string };
+    result: Task;
+  };
+  submit_review: {
     args: {
       taskId: string;
       reviewerNote: string | null;
+      agentId: string | null;
+      model: string | null;
+      effort: string | null;
     };
     result: Task;
   };
@@ -144,15 +186,27 @@ export const api = {
   listProjects: (): Promise<Project[]> =>
     invokeCommand("list_projects", undefined),
 
+  listProjectDir: (projectId: string, path: string | null): Promise<ProjectEntry[]> =>
+    invokeCommand("list_project_dir", { projectId, path }),
+
+  searchProjectFiles: (projectId: string, query: string): Promise<string[]> =>
+    invokeCommand("search_project_files", { projectId, query }),
+
   // --- Tasks ---
 
   createTask: (projectId: string, input: CreateTaskInput): Promise<Task> =>
     invokeCommand("create_task", {
       projectId,
-      title: input.title,
+      title: input.title ?? null,
       prompt: input.prompt,
       fileRefs: input.fileRefs,
+      agentId: input.agentId ?? null,
+      agentModel: input.agentModel ?? null,
+      agentEffort: input.agentEffort ?? null,
     }),
+
+  renameTask: (taskId: string, title: string): Promise<Task> =>
+    invokeCommand("rename_task", { taskId, title }),
 
   listTasks: (projectId: string): Promise<Task[]> =>
     invokeCommand("list_tasks", { projectId }),
@@ -185,14 +239,36 @@ export const api = {
   getAgentModels: (): Promise<AgentModelCatalog> =>
     invokeCommand("get_agent_models", undefined),
 
+  listAgentCatalogs: (): Promise<AgentModelCatalog[]> =>
+    invokeCommand("list_agent_catalogs", undefined),
+
   checkSystemHealth: (): Promise<SystemHealthStatus> =>
     invokeCommand("check_system_health", undefined),
 
-  runTask: (taskId: string): Promise<Task> =>
-    invokeCommand("run_task", { taskId }),
+  runTask: (taskId: string, selection?: AgentSelection): Promise<Task> =>
+    invokeCommand("run_task", {
+      taskId,
+      agentId: selection?.agentId ?? null,
+      model: selection?.model ?? null,
+      effort: selection?.effort ?? null,
+    }),
+
+  retryTask: (taskId: string, selection?: AgentSelection): Promise<Task> =>
+    invokeCommand("retry_task", {
+      taskId,
+      agentId: selection?.agentId ?? null,
+      model: selection?.model ?? null,
+      effort: selection?.effort ?? null,
+    }),
 
   cancelTask: (taskId: string): Promise<Task> =>
     invokeCommand("cancel_task", { taskId }),
+
+  listEditors: (): Promise<EditorInfo[]> =>
+    invokeCommand("list_editors", undefined),
+
+  openWorktreeInEditor: (taskId: string, editorId: string): Promise<Task> =>
+    invokeCommand("open_worktree_in_editor", { taskId, editorId }),
 
   // --- Review ---
 
@@ -205,19 +281,26 @@ export const api = {
       filePath: input.filePath,
       lineNumber: input.lineNumber,
       side: input.side,
+      lineEndNumber: input.lineEndNumber,
       body: input.body,
     }),
 
   resolveReviewComment: (commentId: string): Promise<ReviewComment> =>
     invokeCommand("resolve_review_comment", { commentId }),
 
+  assignReviewComment: (commentId: string, agentId: string | null, model: string | null, effort: string | null): Promise<ReviewComment> =>
+    invokeCommand("assign_review_comment", { commentId, agentId, model, effort }),
+
   listReviewComments: (taskId: string): Promise<ReviewComment[]> =>
     invokeCommand("list_review_comments", { taskId }),
 
-  requestChanges: (taskId: string, reviewerNote?: string): Promise<Task> =>
-    invokeCommand("request_changes", {
+  submitReview: (taskId: string, reviewerNote?: string, selection?: AgentSelection): Promise<Task> =>
+    invokeCommand("submit_review", {
       taskId,
       reviewerNote: reviewerNote?.trim() || null,
+      agentId: selection?.agentId ?? null,
+      model: selection?.model ?? null,
+      effort: selection?.effort ?? null,
     }),
 
   confirmTask: (taskId: string, merge: boolean): Promise<Task> =>

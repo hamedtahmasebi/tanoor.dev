@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { readDir } from "@tauri-apps/plugin-fs";
+
 import { useStore } from "../store";
+import { FileTree, type FileTreeHandle } from "./FileTree";
 import type { CreateTaskInput, EffortLevel, ModelOption, Project } from "../types";
 
 // ---------------------------------------------------------------------------
@@ -42,18 +43,18 @@ function makeRelative(rootPath: string, absPath: string): string {
 // ---------------------------------------------------------------------------
 
 export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }: Props) {
-  const { settings, modelCatalog, openModelDialog } = useStore();
+  const { settings, modelCatalog, agentCatalogs, openModelDialog } = useStore();
 
-  const [title, setTitle] = useState("");
+
   const [prompt, setPrompt] = useState("");
   const [fileRefs, setFileRefs] = useState<string[]>([]);
-  const [projectFiles, setProjectFiles] = useState<string[]>([]);
   const [palette, setPalette] = useState<PaletteState | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Inline model picker state
   const [picker, setPicker] = useState<PickerState | null>(null);
+  const [pickerAgent, setPickerAgent] = useState(settings?.defaultAgent ?? "codex");
   // Local selections while picker is open; committed on accept
   const [pickerModel, setPickerModel] = useState(settings?.codexModel ?? "");
   const [pickerEffort, setPickerEffort] = useState(settings?.codexEffort ?? "");
@@ -63,8 +64,9 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
   // Set to true when picker was requested before the catalog loaded
   const pendingPickerOpen = useRef(false);
 
-  const titleRef = useRef<HTMLInputElement>(null);
+
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const fileTreeRef = useRef<FileTreeHandle>(null);
   const cursorRef = useRef(0);
   const modelChipRef = useRef<HTMLButtonElement>(null);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -81,27 +83,8 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
   // Project file collection
   // -------------------------------------------------------------------------
   useEffect(() => {
-    titleRef.current?.focus();
-    let cancelled = false;
-    const collectFiles = async (directory: string, prefix = ""): Promise<string[]> => {
-      const entries = await readDir(directory);
-      const files: string[] = [];
-      for (const entry of entries) {
-        if (!entry.name) continue;
-        const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (relative === ".git" || relative.startsWith(".git/")) continue;
-        const childPath = `${directory.replace(/[\\\\/]+$/, "")}${project.rootPath.includes("\\") ? "\\" : "/"}${entry.name}`;
-        if (entry.isDirectory) files.push(...await collectFiles(childPath, relative));
-        else if (entry.isFile) files.push(relative);
-        if (files.length >= 200) break;
-      }
-      return files;
-    };
-    void collectFiles(project.rootPath).then((files) => {
-      if (!cancelled) setProjectFiles(files.slice(0, 200).sort());
-    }).catch(() => setProjectFiles([]));
-    return () => { cancelled = true; };
-  }, [project.rootPath]);
+    promptRef.current?.focus();
+  }, [project.id]);
 
   // -------------------------------------------------------------------------
   // Escape handler
@@ -148,14 +131,24 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
   // Inline model picker helpers
   // -------------------------------------------------------------------------
 
-  const models = modelCatalog?.models ?? [];
+  const activeCatalog = agentCatalogs.find((catalog) => catalog.agentId === pickerAgent) ?? modelCatalog;
+  const models = activeCatalog?.models ?? [];
 
-  const openPicker = () => {
-    // Ensure catalog is loaded; remember to open once it arrives
-    if (!modelCatalog) { pendingPickerOpen.current = true; void openModelDialog(); return; }
-    const currentModel = settings?.codexModel ?? "";
-    const currentEffort = settings?.codexEffort ?? "";
-    const modelIdx = Math.max(0, models.findIndex((m) => m.id === currentModel));
+  const openPicker = async () => {
+    // Refresh on every open so the picker reflects the agent's current catalog.
+    pendingPickerOpen.current = true;
+    await openModelDialog();
+    pendingPickerOpen.current = false;
+    const latest = useStore.getState();
+    const agent = latest.settings?.defaultAgent ?? "codex";
+    const catalog = latest.agentCatalogs.find((item) => item.agentId === agent)
+      ?? latest.modelCatalog;
+    if (!catalog) return;
+    const refreshedModels = catalog.models;
+    const currentModel = catalog.selectedModel;
+    const currentEffort = catalog.selectedEffort;
+    setPickerAgent(catalog.agentId);
+    const modelIdx = Math.max(0, refreshedModels.findIndex((m) => m.id === currentModel));
     setPickerModel(currentModel);
     setPickerEffort(currentEffort);
     setFocusedModel(modelIdx);
@@ -207,18 +200,13 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
 
   const saveSelection = async (modelId: string, effortId: string) => {
     setPicker(null);
-    await useStore.getState().saveModelSelection(modelId, effortId);
+    await useStore.getState().saveModelSelection(pickerAgent, modelId, effortId);
     modelChipRef.current?.focus();
   };
 
   // -------------------------------------------------------------------------
   // Inline palette (@ / / commands in textarea)
   // -------------------------------------------------------------------------
-
-  const filteredFiles = useMemo(() => {
-    const query = palette?.query.toLowerCase() ?? "";
-    return projectFiles.filter((file) => file.toLowerCase().includes(query)).slice(0, 8);
-  }, [palette, projectFiles]);
 
   const detectPalette = (value: string, cursor: number) => {
     const before = value.slice(0, cursor);
@@ -269,23 +257,41 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!title.trim() || !prompt.trim() || isSubmitting) return;
+    if (!prompt.trim() || isSubmitting) return;
     setIsSubmitting(true);
     setError(null);
-    try { await onCreate({ title: title.trim(), prompt: prompt.trim(), fileRefs }); }
+    const catalog = agentCatalogs.find((item) => item.agentId === pickerAgent);
+    const selectedModel = pickerModel || catalog?.selectedModel || settings?.codexModel || "";
+    try { await onCreate({ prompt: prompt.trim(), fileRefs, agentId: pickerAgent, agentModel: selectedModel, agentEffort: pickerEffort }); }
     catch (submissionError) { setError(String(submissionError)); setIsSubmitting(false); }
   };
 
-  const canSubmit = Boolean(title.trim() && prompt.trim()) && !isSubmitting;
-  const paletteItems = palette?.type === "reference" ? filteredFiles : COMMANDS.filter((command) => command.name.includes(palette?.query.toLowerCase() ?? ""));
+  // Route arrow/enter keys to the file tree while the reference palette is
+  // open. The textarea keeps focus so the user can keep typing the query.
+  const handleReferenceKeys = (event: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (palette?.type !== "reference") return false;
+    switch (event.key) {
+      case "ArrowDown": event.preventDefault(); fileTreeRef.current?.moveDown(); return true;
+      case "ArrowUp": event.preventDefault(); fileTreeRef.current?.moveUp(); return true;
+      case "ArrowRight": event.preventDefault(); fileTreeRef.current?.expand(); return true;
+      case "ArrowLeft": event.preventDefault(); fileTreeRef.current?.collapse(); return true;
+      case "Enter": case "Tab": event.preventDefault(); fileTreeRef.current?.select(); return true;
+      case "Escape": event.preventDefault(); setPalette(null); return true;
+      default: return false;
+    }
+  };
+
+  const canSubmit = Boolean(prompt.trim()) && !isSubmitting;
+  const commandItems = COMMANDS.filter((command) => command.name.includes(palette?.query.toLowerCase() ?? ""));
 
   // -------------------------------------------------------------------------
   // Model chip label
   // -------------------------------------------------------------------------
-  const activeModel = models.find((m) => m.id === settings?.codexModel);
+  const activeModel = models.find((m) => m.id === pickerModel)
+    ?? models.find((m) => m.id === activeCatalog?.selectedModel);
   const chipLabel = activeModel
-    ? `${activeModel.label}${settings?.codexEffort ? ` · ${settings.codexEffort}` : ""}`
-    : (settings?.codexModel ?? "");
+    ? `${pickerAgent} · ${activeModel.label}${pickerEffort ? ` · ${pickerEffort}` : ""}`
+    : (settings?.defaultAgent ?? "Model");
 
   // -------------------------------------------------------------------------
   // Active effort levels for the current picker model
@@ -300,40 +306,40 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
     <section className="composer-pane">
       <div className="composer-intro">
         <div className="composer-eyebrow"><span className="composer-prompt-symbol">›</span> New task <span className="composer-project">in {project.rootPath}</span></div>
-        <h1>What should Codex work on?</h1>
+        <h1>What should your coding agent work on?</h1>
         <p>Describe the change in plain language. Use <kbd>@</kbd> to reference files and <kbd>/</kbd> for commands.</p>
       </div>
 
       <form className="task-composer" onSubmit={handleSubmit}>
-        <input ref={titleRef} className="composer-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Task title" maxLength={200} aria-label="Task title" />
+
         <div className="composer-editor-wrap">
           <textarea
             ref={promptRef}
             className="composer-editor"
             value={prompt}
             onChange={handlePromptChange}
-            onKeyUp={(event) => { cursorRef.current = event.currentTarget.selectionStart; detectPalette(event.currentTarget.value, event.currentTarget.selectionStart); }}
+            onKeyDown={(event) => { handleReferenceKeys(event); }}
+            onKeyUp={(event) => { if (palette?.type === "reference" && ["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Enter", "Tab"].includes(event.key)) return; cursorRef.current = event.currentTarget.selectionStart; detectPalette(event.currentTarget.value, event.currentTarget.selectionStart); }}
             placeholder="Describe the task…"
             rows={9}
             aria-label="Task prompt"
           />
           {palette && (
             <div className="inline-palette" role="listbox">
-              <div className="inline-palette-header"><span>{palette.type === "reference" ? "Project files" : "Commands"}</span><kbd>↑↓</kbd></div>
-              {paletteItems.length === 0
-                ? <div className="inline-palette-empty">No matches</div>
-                : paletteItems.map((item) => {
-                  const name = typeof item === "string" ? item : item.name;
-                  const label = typeof item === "string" ? item : item.label;
-                  const hint = typeof item === "string" ? "File in this project" : item.hint;
-                  return (
-                    <button key={name} type="button" className="inline-palette-item" onMouseDown={(event) => event.preventDefault()} onClick={() => insertPaletteItem(name, palette.type)}>
-                      <span className="palette-item-icon">{palette.type === "reference" ? "·/" : "/"}</span>
-                      <span><strong>{label}</strong><small>{hint}</small></span>
-                      <kbd>↵</kbd>
-                    </button>
-                  );
-                })}
+              <div className="inline-palette-header"><span>{palette.type === "reference" ? "Project files" : "Commands"}</span><kbd>{palette.type === "reference" ? "↑↓ ←→ ↵" : "↵"}</kbd></div>
+              {palette.type === "reference" ? (
+                <FileTree ref={fileTreeRef} projectId={project.id} query={palette.query} onSelect={(path) => insertPaletteItem(path, "reference")} />
+              ) : commandItems.length === 0 ? (
+                <div className="inline-palette-empty">No matches</div>
+              ) : (
+                commandItems.map((item) => (
+                  <button key={item.name} type="button" className="inline-palette-item" onMouseDown={(event) => event.preventDefault()} onClick={() => insertPaletteItem(item.name, "command")}>
+                    <span className="palette-item-icon">/</span>
+                    <span><strong>{item.label}</strong><small>{item.hint}</small></span>
+                    <kbd>↵</kbd>
+                  </button>
+                ))
+              )}
             </div>
           )}
         </div>
@@ -373,19 +379,28 @@ export function NewTaskDialog({ project, onClose, onCreate, onOpenModelPicker }:
             {picker && (
               <div ref={pickerRef} className="model-picker" role="listbox" aria-label={picker.step === "model" ? "Select model" : "Select effort"}>
                 <div className="model-picker-header">
-                  <span>{picker.step === "model" ? "Model" : "Reasoning effort"}</span>
+                  <span>{picker.step === "model" ? "Agent and model" : "Reasoning effort"}</span>
                   <kbd>↑↓ navigate · ↵ select · esc cancel</kbd>
                 </div>
 
                 {picker.step === "model" && (
-                  <ModelPickerList
-                    models={models}
-                    focusedIdx={focusedModel}
-                    selectedId={pickerModel}
-                    onFocus={setFocusedModel}
-                    onCommit={commitModel}
-                    onEscape={closePicker}
-                  />
+                  <>
+                    <div className="segmented-control" role="tablist" aria-label="Coding agent">
+                      {agentCatalogs.map((catalog) => (
+                        <button key={catalog.agentId} type="button" className={`segmented-control-item${catalog.agentId === pickerAgent ? " active" : ""}`} role="tab" aria-selected={catalog.agentId === pickerAgent} onClick={() => { setPickerAgent(catalog.agentId); setPickerModel(catalog.selectedModel); setPickerEffort(catalog.selectedEffort); setFocusedModel(0); }}>
+                          {catalog.agentLabel}
+                        </button>
+                      ))}
+                    </div>
+                    <ModelPickerList
+                      models={models}
+                      focusedIdx={focusedModel}
+                      selectedId={pickerModel}
+                      onFocus={setFocusedModel}
+                      onCommit={commitModel}
+                      onEscape={closePicker}
+                    />
+                  </>
                 )}
 
                 {picker.step === "effort" && (

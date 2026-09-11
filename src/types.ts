@@ -14,6 +14,7 @@ export type TaskStatus =
   | "running"
   | "awaiting_review"
   | "changes_requested"
+  | "ready"
   | "approved"
   | "failed"
   | "cancelled";
@@ -29,6 +30,9 @@ export interface Task {
   worktreePath: string | null;
   branchName: string | null;
   agentThreadId: string | null;
+  agentId: string | null;
+  agentModel: string | null;
+  agentEffort: string | null;
   diff: string | null;
   createdAt: string;
   updatedAt: string;
@@ -43,6 +47,10 @@ export interface TaskTurn {
   logPath: string;
   startedAt: string;
   endedAt: string | null;
+  agentId: string | null;
+  agentModel: string | null;
+  agentEffort: string | null;
+  agentThreadId: string | null;
 }
 
 export interface TaskEvent {
@@ -73,6 +81,7 @@ export interface BinaryHealthStatus {
 export interface SystemHealthStatus {
   codex: CodexHealthStatus;
   git: BinaryHealthStatus;
+  agents: CodexHealthStatus[];
 }
 
 export interface AppSettings {
@@ -83,11 +92,17 @@ export interface AppSettings {
   sandboxMode: "workspace-write";
   codexModel: string;
   codexEffort: string;
+  defaultAgent: string;
+  claudeBin: string;
+  claudeModel: string;
+  opencodeBin: string;
+  opencodeModel: string;
 }
 
 export type UpdateSettingsInput = Pick<
   AppSettings,
   "codexBin" | "gitBin" | "maxConcurrentTasks" | "mergeOnConfirm" | "codexModel" | "codexEffort"
+  | "defaultAgent" | "claudeBin" | "claudeModel" | "opencodeBin" | "opencodeModel"
 >;
 
 // ---------------------------------------------------------------------------
@@ -115,6 +130,9 @@ export interface AgentModelCatalog {
   models: ModelOption[];
   selectedModel: string;
   selectedEffort: string;
+  available: boolean;
+  error: string | null;
+  refreshedAt: string;
 }
 
 export type DiffSide = "old" | "new";
@@ -125,15 +143,26 @@ export interface ReviewComment {
   turnId: string;
   filePath: string;
   lineNumber: number | null;
+  lineEndNumber: number | null;
   side: DiffSide | null;
   body: string;
   resolved: boolean;
+  assignedAgentId: string | null;
+  assignedModel: string | null;
+  assignedEffort: string | null;
   createdAt: string;
+}
+
+export interface AgentSelection {
+  agentId?: string | null;
+  model?: string | null;
+  effort?: string | null;
 }
 
 export interface AddReviewCommentInput {
   filePath: string;
   lineNumber: number | null;
+  lineEndNumber: number | null;
   side: DiffSide | null;
   body: string;
 }
@@ -143,9 +172,25 @@ export interface AddReviewCommentInput {
 // ---------------------------------------------------------------------------
 
 export interface CreateTaskInput {
-  title: string;
+  title?: string;
   prompt: string;
   fileRefs: string[];
+  agentId?: string;
+  agentModel?: string;
+  agentEffort?: string;
+}
+
+export interface EditorInfo {
+  id: string;
+  label: string;
+  command: string;
+}
+
+export interface ProjectEntry {
+  name: string;
+  /** Path relative to the project root, using `/` separators. */
+  path: string;
+  isDir: boolean;
 }
 
 export interface UpdateTaskInput {

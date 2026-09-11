@@ -5,3 +5,4 @@ target/
 src-tauri/gen/
 *.log
 .DS_Store
+.local/

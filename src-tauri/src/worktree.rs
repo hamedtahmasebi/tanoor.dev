@@ -15,7 +15,8 @@ use crate::error::AppError;
 
 /// Drives every git operation Tanoor needs.
 ///
-/// Branch naming convention: `task/<task_id>` (e.g. `task/abc123`).
+/// Branch names are decided when tasks are created, typically as
+/// `task/<generated-slug>-<task-id-prefix>`.
 /// Worktree path convention (caller-controlled): `{app_data_dir}/worktrees/{task_id}`.
 #[derive(Debug, Clone)]
 pub struct WorktreeManager {
@@ -113,6 +114,23 @@ impl WorktreeManager {
             &["worktree", "add", wt.as_ref(), "-b", branch_name, base_ref],
             repo_root,
         )?;
+        Ok(())
+    }
+
+    /// Restore a worktree that was removed externally, checking out its
+    /// existing branch after pruning Git's stale worktree metadata.
+    pub fn ensure_worktree(
+        &self,
+        repo_root: &Path,
+        worktree_path: &Path,
+        branch_name: &str,
+    ) -> Result<(), AppError> {
+        if worktree_path.exists() {
+            return Ok(());
+        }
+        let _ = self.git(&["worktree", "prune"], repo_root);
+        let path = worktree_path.to_string_lossy();
+        self.git(&["worktree", "add", path.as_ref(), branch_name], repo_root)?;
         Ok(())
     }
 
@@ -386,6 +404,30 @@ mod tests {
 
         // prune-based path must succeed.
         wm().remove_worktree(repo.path(), wt.path(), "task/t003")
+            .unwrap();
+    }
+
+    #[test]
+    fn ensure_worktree_restores_externally_deleted_worktree() {
+        let repo = TempDir::new().unwrap();
+        let wt = TempDir::new().unwrap();
+        let base = init_repo(repo.path());
+        wm().add_worktree(repo.path(), wt.path(), "task/recover", &base)
+            .unwrap();
+        std::fs::write(wt.path().join("committed.txt"), "kept\n").unwrap();
+        wm().commit_all(wt.path(), "Tanoor: recovery fixture")
+            .unwrap();
+        std::fs::remove_dir_all(wt.path()).unwrap();
+
+        wm().ensure_worktree(repo.path(), wt.path(), "task/recover")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("committed.txt"))
+                .unwrap()
+                .trim(),
+            "kept"
+        );
+        wm().remove_worktree(repo.path(), wt.path(), "task/recover")
             .unwrap();
     }
 

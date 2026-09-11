@@ -21,12 +21,15 @@ pub struct Task {
     pub prompt: String,
     /// Paths relative to the project root.
     pub file_refs: Vec<String>,
-    /// draft | running | awaiting_review | changes_requested | approved | failed | cancelled
+    /// draft | running | awaiting_review | changes_requested | ready | approved | failed | cancelled
     pub status: String,
     pub base_ref: Option<String>,
     pub worktree_path: Option<String>,
     pub branch_name: Option<String>,
     pub agent_thread_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_model: Option<String>,
+    pub agent_effort: Option<String>,
     /// Cumulative unified diff against `base_ref`, captured after each turn.
     pub diff: Option<String>,
     pub created_at: String,
@@ -43,10 +46,15 @@ pub struct ReviewComment {
     pub file_path: String,
     /// One-based line number on `side`; `None` denotes a file-level comment.
     pub line_number: Option<i64>,
+    /// Inclusive range end on `side`; `None` denotes a single-line comment.
+    pub line_end_number: Option<i64>,
     /// `old` or `new` for line comments; `None` for file-level comments.
     pub side: Option<String>,
     pub body: String,
     pub resolved: bool,
+    pub assigned_agent_id: Option<String>,
+    pub assigned_model: Option<String>,
+    pub assigned_effort: Option<String>,
     pub created_at: String,
 }
 
@@ -62,6 +70,11 @@ pub struct AppSettings {
     pub sandbox_mode: String,
     pub codex_model: String,
     pub codex_effort: String,
+    pub default_agent: String,
+    pub claude_bin: String,
+    pub claude_model: String,
+    pub opencode_bin: String,
+    pub opencode_model: String,
 }
 
 /// A single agent turn associated with a task.
@@ -76,6 +89,10 @@ pub struct TaskTurn {
     pub log_path: String,
     pub started_at: String,
     pub ended_at: Option<String>,
+    pub agent_id: Option<String>,
+    pub agent_model: Option<String>,
+    pub agent_effort: Option<String>,
+    pub agent_thread_id: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -88,6 +105,11 @@ impl Default for AppSettings {
             sandbox_mode: "workspace-write".to_string(),
             codex_model: "o4-mini".to_string(),
             codex_effort: "medium".to_string(),
+            default_agent: "codex".to_string(),
+            claude_bin: "claude".to_string(),
+            claude_model: "sonnet".to_string(),
+            opencode_bin: "opencode".to_string(),
+            opencode_model: "anthropic/claude-sonnet-4-5".to_string(),
         }
     }
 }
